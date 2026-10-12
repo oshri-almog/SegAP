@@ -14,9 +14,9 @@ class Engine(private val context: Context) {
     private val cfgDir = File(context.filesDir, "cfg")
 
     private fun installScript() {
-        context.assets.open("mh_engine.sh").use { input ->
-            script.outputStream().use { input.copyTo(it) }
-        }
+        // Strip CR defensively: a CRLF script fails in Android's shell with confusing errors.
+        val text = context.assets.open("mh_engine.sh").use { it.readBytes().toString(Charsets.UTF_8) }.replace("\r", "")
+        script.writeText(text)
     }
 
     /** Regulatory country the Wi-Fi driver is currently using (never chosen by the user). */

@@ -1,0 +1,5 @@
+# The engine runs on Android's /system/bin/sh: it must never get CRLF line endings.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.jar binary
+*.png binary
