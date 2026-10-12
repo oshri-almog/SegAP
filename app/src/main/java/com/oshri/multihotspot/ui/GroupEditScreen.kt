@@ -1,0 +1,286 @@
+package com.oshri.multihotspot.ui
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Autorenew
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.oshri.multihotspot.HotspotController
+import com.oshri.multihotspot.model.Group
+import com.oshri.multihotspot.model.Ipv4
+import com.oshri.multihotspot.model.Mac
+import com.oshri.multihotspot.model.Passwords
+import com.oshri.multihotspot.model.StaticLease
+import com.oshri.multihotspot.model.Validation
+import com.oshri.multihotspot.model.suggestNewGroup
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun GroupEditScreen(groupId: String?, onDone: () -> Unit) {
+    val config by HotspotController.config.collectAsStateWithLifecycle()
+    val original = remember { groupId?.let { config.group(it) } ?: config.suggestNewGroup("Network ${config.groups.size + 1}") }
+    val isNew = groupId == null
+
+    var name by remember { mutableStateOf(original.name) }
+    var password by remember { mutableStateOf(original.password) }
+    var showPw by remember { mutableStateOf(isNew) }
+    var gateway by remember { mutableStateOf(original.gateway) }
+    var prefix by remember { mutableStateOf(original.prefix.toString()) }
+    var dhcpStart by remember { mutableStateOf(original.dhcpStart) }
+    var dhcpEnd by remember { mutableStateOf(original.dhcpEnd) }
+    var lease by remember { mutableStateOf(original.leaseHours.toString()) }
+    var internet by remember { mutableStateOf(original.internet) }
+    var seeEachOther by remember { mutableStateOf(original.devicesSeeEachOther) }
+    var dns1 by remember { mutableStateOf(original.dns1) }
+    var dns2 by remember { mutableStateOf(original.dns2) }
+    var leases by remember { mutableStateOf(config.staticLeases.filter { it.groupId == original.id }) }
+    var errors by remember { mutableStateOf<List<String>>(emptyList()) }
+    var confirmDelete by remember { mutableStateOf(false) }
+    var addLease by remember { mutableStateOf(false) }
+
+    /** Keeps the DHCP range inside the subnet when the gateway or prefix changes. */
+    fun syncRange(gw: String, pfx: String) {
+        val g = Ipv4.parse(gw) ?: return
+        val p = pfx.toIntOrNull()?.takeIf { it in 16..30 } ?: return
+        val s = Ipv4.parse(dhcpStart); val e = Ipv4.parse(dhcpEnd)
+        if (s != null && e != null && Ipv4.inSubnet(s, g, p) && Ipv4.inSubnet(e, g, p) && g !in s..e) return
+        val net = Ipv4.network(g, p); val bc = Ipv4.broadcast(g, p)
+        val size = bc - net - 1
+        val (start, end) = if (size >= 200) Pair(net + 100, minOf(net + 200, bc - 1)) else Pair(net + 2, bc - 1)
+        val (fs, fe) = if (g in start..end) Pair(if (g + 1 <= end) g + 1 else start, end) else Pair(start, end)
+        dhcpStart = Ipv4.format(fs); dhcpEnd = Ipv4.format(fe)
+    }
+
+    fun build(): Group = original.copy(
+        name = name.trim(), password = password, gateway = gateway.trim(),
+        prefix = prefix.toIntOrNull() ?: -1, dhcpStart = dhcpStart.trim(), dhcpEnd = dhcpEnd.trim(),
+        leaseHours = lease.toIntOrNull() ?: -1, internet = internet, devicesSeeEachOther = seeEachOther,
+        dns1 = dns1.trim(), dns2 = dns2.trim(),
+    )
+
+    fun save() {
+        val g = build()
+        val groupErrors = Validation.group(g)
+        if (groupErrors.isNotEmpty()) { errors = groupErrors; return }
+        val groups = if (isNew) config.groups + g else config.groups.map { if (it.id == g.id) g else it }
+        val candidate = config.copy(
+            groups = groups,
+            staticLeases = config.staticLeases.filter { it.groupId != g.id } + leases,
+        )
+        val all = Validation.config(candidate).filter { it.contains(g.name) || it.startsWith("Fixed IP") || it.startsWith("Device") }
+        if (all.isNotEmpty()) { errors = all; return }
+        HotspotController.updateConfig(candidate)
+        onDone()
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text(if (isNew) "New network" else "Edit ${original.name}") },
+                navigationIcon = { IconButton(onClick = onDone) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") } },
+                actions = {
+                    if (!isNew && config.groups.size > 1) IconButton(onClick = { confirmDelete = true }) {
+                        Icon(Icons.Default.Delete, contentDescription = "Delete network")
+                    }
+                },
+            )
+        },
+    ) { padding ->
+        Column(
+            Modifier.fillMaxSize().padding(padding).imePadding().verticalScroll(rememberScrollState()).padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            if (errors.isNotEmpty()) MessageCard("Please fix", errors.joinToString("\n") { "• $it" }, error = true)
+
+            OutlinedTextField(name, { name = it }, label = { Text("Name (only shown in this app)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(
+                value = password, onValueChange = { password = it },
+                label = { Text("Wi-Fi password for this network") },
+                singleLine = true,
+                visualTransformation = if (showPw) VisualTransformation.None else PasswordVisualTransformation(),
+                supportingText = { Text("Devices that join with this password land in this network. 8-63 characters, unique per network.") },
+                trailingIcon = {
+                    Row {
+                        IconButton(onClick = { showPw = !showPw }) { Icon(if (showPw) Icons.Default.VisibilityOff else Icons.Default.Visibility, "Show") }
+                        IconButton(onClick = { password = Passwords.generate(); showPw = true }) { Icon(Icons.Default.Autorenew, "Generate") }
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+            )
+
+            SectionLabel("Addressing")
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(gateway, { gateway = it; syncRange(it, prefix) }, label = { Text("Gateway (phone) IP") }, singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(2f))
+                OutlinedTextField(prefix, { prefix = it.filter(Char::isDigit).take(2); syncRange(gateway, prefix) }, label = { Text("Prefix /") }, singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
+            }
+            val cidr = build().networkCidr
+            if (cidr.isNotEmpty()) Text("Subnet $cidr · mask ${Ipv4.format(Ipv4.mask(prefix.toIntOrNull()?.coerceIn(0, 32) ?: 24))}",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(dhcpStart, { dhcpStart = it }, label = { Text("DHCP from") }, singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f))
+                OutlinedTextField(dhcpEnd, { dhcpEnd = it }, label = { Text("DHCP to") }, singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f))
+            }
+            OutlinedTextField(lease, { lease = it.filter(Char::isDigit).take(3) }, label = { Text("Lease time (hours)") }, singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(dns1, { dns1 = it }, label = { Text("DNS 1") }, singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f))
+                OutlinedTextField(dns2, { dns2 = it }, label = { Text("DNS 2 (optional)") }, singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f))
+            }
+
+            SectionLabel("Access")
+            SwitchRow("Internet access", "Off = devices only reach the phone (LAN-only network, e.g. for IoT).", internet) { internet = it }
+            SwitchRow(
+                "Devices can see each other",
+                "Off = every device is isolated from the others in this network (recommended for guests).",
+                seeEachOther,
+            ) { seeEachOther = it }
+            Text(
+                "Devices in different networks can never reach each other.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            SectionLabel("Fixed IPs in this network")
+            if (leases.isEmpty()) Text("None. You can also add one from the device list on the main screen.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            leases.forEach { l ->
+                Card(Modifier.fillMaxWidth()) {
+                    Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(l.ip, style = MaterialTheme.typography.titleSmall)
+                            Text(listOf(l.label, l.mac).filter { it.isNotBlank() }.joinToString(" · "), style = MaterialTheme.typography.bodySmall)
+                        }
+                        IconButton(onClick = { leases = leases - l }) { Icon(Icons.Default.Delete, "Remove fixed IP") }
+                    }
+                }
+            }
+            OutlinedButton(onClick = { addLease = true }) { Text("Add fixed IP") }
+
+            HorizontalDivider(Modifier.padding(vertical = 8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = { save() }) { Text("Save") }
+                TextButton(onClick = onDone) { Text("Cancel") }
+            }
+            Spacer(Modifier.height(32.dp))
+        }
+    }
+
+    if (confirmDelete) AlertDialog(
+        onDismissRequest = { confirmDelete = false },
+        title = { Text("Delete ${original.name}?") },
+        text = { Text("Its password stops working and its fixed IPs are removed (after Apply changes).") },
+        confirmButton = {
+            TextButton(onClick = {
+                HotspotController.updateConfig(
+                    config.copy(
+                        groups = config.groups.filter { it.id != original.id },
+                        staticLeases = config.staticLeases.filter { it.groupId != original.id },
+                    )
+                )
+                confirmDelete = false
+                onDone()
+            }) { Text("Delete") }
+        },
+        dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } },
+    )
+
+    if (addLease) {
+        var mac by remember { mutableStateOf("") }
+        var ip by remember { mutableStateOf("") }
+        var label by remember { mutableStateOf("") }
+        val g = build()
+        val gw = Ipv4.parse(g.gateway)
+        val err = when {
+            Mac.normalize(mac) == null -> "MAC must look like aa:bb:cc:dd:ee:ff"
+            Ipv4.parse(ip) == null -> "Not a valid IPv4 address"
+            gw == null || !Ipv4.inSubnet(Ipv4.parse(ip)!!, gw, g.prefix) -> "Must be inside ${g.networkCidr}"
+            ip == g.gateway -> "That's the gateway address"
+            else -> null
+        }
+        AlertDialog(
+            onDismissRequest = { addLease = false },
+            title = { Text("Add fixed IP") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(mac, { mac = it }, label = { Text("Device MAC") }, singleLine = true)
+                    OutlinedTextField(ip, { ip = it.trim() }, label = { Text("IP address") }, singleLine = true,
+                        isError = ip.isNotEmpty() && err != null, supportingText = { if (mac.isNotEmpty() || ip.isNotEmpty()) err?.let { Text(it) } })
+                    OutlinedTextField(label, { label = it }, label = { Text("Label (optional)") }, singleLine = true)
+                    Text("Tip: phones use a random MAC per network - copy it from the device list after it connects once.",
+                        style = MaterialTheme.typography.bodySmall)
+                }
+            },
+            confirmButton = {
+                TextButton(enabled = err == null, onClick = {
+                    val m = Mac.normalize(mac)!!
+                    leases = leases.filterNot { it.mac == m } + StaticLease(m, original.id, ip, label.trim())
+                    addLease = false
+                }) { Text("Add") }
+            },
+            dismissButton = { TextButton(onClick = { addLease = false }) { Text("Cancel") } },
+        )
+    }
+}
+
+@Composable
+fun SectionLabel(text: String) {
+    Text(text, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 8.dp))
+}
+
+@Composable
+fun SwitchRow(title: String, subtitle: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Spacer(Modifier.width(12.dp))
+        Switch(checked = checked, onCheckedChange = onChange)
+    }
+}
