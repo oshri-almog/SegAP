@@ -88,6 +88,12 @@ offered but only work where the firmware allows them.
 
 Other phones may work but are untested; hotspot interface names, driver capabilities and vendor binaries differ.
 
+## Download
+
+Get the signed APK from [**Releases**](https://github.com/oshri-almog/SegAP/releases/latest), install it on the
+rooted phone, open SegAP and tap **Grant** when Magisk asks for root. Each release lists the APK's SHA-256 and
+the signing certificate's fingerprint.
+
 ## Build & install
 
 Requirements: JDK 17+ (tested with 21) and the Android SDK with platform 35 and build-tools 35.0.0. The
@@ -100,6 +106,11 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
 Open the app on the phone and grant root when Magisk asks.
+
+`./gradlew assembleRelease` builds a shrunk (R8) release APK, about 2 MB. To sign it, add
+`segap.signing=<path>` to `local.properties`, pointing to a properties file with `storeFile`, `storePassword`,
+`keyAlias` and `keyPassword`; without it the release APK is unsigned. A debug build and the published release are
+signed with different keys, so switching between them means uninstalling first (the app's settings are lost).
 
 The native helper is prebuilt in `app/src/main/jniLibs/arm64-v8a/libmhwl.so`. To rebuild it on Windows run
 `native/build.ps1` (it expects NDK r27d unpacked at `%LOCALAPPDATA%\Android\Sdk\ndk-extract\android-ndk-r27d`;

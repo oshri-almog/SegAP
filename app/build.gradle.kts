@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -17,10 +19,31 @@ android {
         versionName = "1.0"
     }
 
+    // The release key lives outside the repo. local.properties (not committed) may contain
+    // segap.signing=<path to a properties file with storeFile, storePassword, keyAlias, keyPassword>.
+    // Without it, assembleRelease produces an unsigned APK.
+    val signingFile = Properties().apply {
+        rootProject.file("local.properties").takeIf { it.exists() }?.inputStream()?.use { load(it) }
+    }.getProperty("segap.signing")?.let(::file)?.takeIf { it.exists() }
+
+    signingConfigs {
+        if (signingFile != null) {
+            val p = Properties().apply { signingFile.inputStream().use { load(it) } }
+            create("release") {
+                storeFile = file(p.getProperty("storeFile"))
+                storePassword = p.getProperty("storePassword")
+                keyAlias = p.getProperty("keyAlias")
+                keyPassword = p.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
-            isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("debug")
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            signingConfig = signingConfigs.findByName("release")
         }
     }
 
