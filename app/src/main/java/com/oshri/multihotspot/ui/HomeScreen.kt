@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -339,31 +340,40 @@ private fun GroupCard(
         Row(Modifier.height(IntrinsicSize.Min)) {
             Box(Modifier.width(6.dp).fillMaxHeight().background(color, RoundedCornerShape(topStart = 12.dp, bottomStart = 12.dp)))
             Column(Modifier.padding(14.dp).weight(1f)) {
+                // Title row: name, password, then show / QR / copy, then edit.
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(group.name, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-                    IconButton(onClick = onEdit) { Icon(Icons.Default.Edit, contentDescription = "Edit ${group.name}") }
+                    Text(
+                        group.name,
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        // Not weighted: the password takes all remaining space, so the buttons sit at the right edge.
+                        modifier = Modifier.widthIn(max = 140.dp),
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        if (showPw) group.password else "•".repeat(8),
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    CardIconButton(
+                        if (showPw) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                        if (showPw) "Hide password" else "Show password",
+                    ) { showPw = !showPw }
+                    CardIconButton(Icons.Default.QrCode2, "Show QR code for ${group.name}", onQr)
+                    CardIconButton(Icons.Default.ContentCopy, "Copy password") { clipboard.setText(AnnotatedString(group.password)) }
+                    CardIconButton(Icons.Default.Edit, "Edit ${group.name}", onEdit)
                 }
                 Text(
                     "${group.networkCidr} · gateway ${group.gateway}",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 6.dp),
                 )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        if (showPw) group.password else "•".repeat(10),
-                        fontFamily = FontFamily.Monospace,
-                        modifier = Modifier.weight(1f),
-                    )
-                    IconButton(onClick = { showPw = !showPw }) {
-                        Icon(if (showPw) Icons.Default.VisibilityOff else Icons.Default.Visibility, contentDescription = "Show password")
-                    }
-                    IconButton(onClick = onQr) {
-                        Icon(Icons.Default.QrCode2, contentDescription = "Show QR code for ${group.name}")
-                    }
-                    IconButton(onClick = { clipboard.setText(AnnotatedString(group.password)) }) {
-                        Icon(Icons.Default.ContentCopy, contentDescription = "Copy password")
-                    }
-                }
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Tag(if (group.internet) "Internet" else "No internet")
                     if (group.tailscale) Tag("Tailscale")
@@ -379,6 +389,14 @@ private fun GroupCard(
                 }
             }
         }
+    }
+}
+
+/** Compact icon button so four fit next to the name and password on a phone-width card. */
+@Composable
+private fun CardIconButton(icon: androidx.compose.ui.graphics.vector.ImageVector, description: String, onClick: () -> Unit) {
+    IconButton(onClick = onClick, modifier = Modifier.size(40.dp)) {
+        Icon(icon, contentDescription = description, modifier = Modifier.size(20.dp))
     }
 }
 
