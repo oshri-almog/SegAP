@@ -59,6 +59,7 @@ object ConfigWriter {
                     g.id, g.gateway, g.prefix, g.networkCidr, g.netmask,
                     if (g.internet) 1 else 0, if (g.devicesSeeEachOther) 0 else 1,
                     g.dhcpStart, g.dhcpEnd, "${g.leaseHours}h", dns,
+                    if (g.tailscale) 1 else 0,
                 ).joinToString(" ")
             )
         }

@@ -126,8 +126,9 @@ fun SettingsScreen(onDone: () -> Unit) {
             SectionLabel("Isolation")
             SwitchRow(
                 "Strict isolation (recommended)",
-                "All traffic between devices passes through the phone's firewall. Turn off only if you need casting / device discovery between devices; " +
-                    "then devices on the same Wi-Fi can reach each other directly.",
+                "On: all traffic between devices passes through the phone's firewall, so networks stay separated. " +
+                    "Off: ALL devices on ALL passwords, guests included, can reach each other directly over Wi-Fi " +
+                    "(needed for casting / device discovery). Per-network isolation is then not enforced.",
                 strict,
             ) { strict = it }
 

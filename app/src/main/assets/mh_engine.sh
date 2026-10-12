@@ -5,36 +5,68 @@
 # with its own subnet, DHCP range, DNS and firewall policy.
 #
 # usage:
-#   mh_engine.sh start <cfgdir>   start with config files from <cfgdir>
+#   mh_engine.sh start <cfgdir>   start (or restart) with config files from <cfgdir>
 #   mh_engine.sh stop             stop and undo every change
 #   mh_engine.sh status           print state and connected clients
-#   mh_engine.sh daemon           (internal) event loop
+#   mh_engine.sh daemon           (internal) event loop + watchdog
 #
 # <cfgdir> must contain:
 #   engine.conf  KEY=VALUE lines: IFACE, MAC, WIFI_MODE (keep|off), UPSTREAM (auto|<iface>), DEFAULT_GROUP
 #   hostapd.conf complete hostapd config (wpa_psk_file must point to $HD/psk.txt)
 #   psk.txt      hostapd wpa_psk_file, one "keyid=<group> 00:00:00:00:00:00 <passphrase>" per group
-#   groups.conf  ID GW PREFIX NETCIDR NETMASK INTERNET(0|1) ISOLATE(0|1) DHCP_START DHCP_END LEASE DNS(csv)
+#   groups.conf  ID GW PREFIX NETCIDR NETMASK INTERNET(0|1) ISOLATE(0|1) DHCP_START DHCP_END LEASE DNS(csv) TAILSCALE(0|1)
 #   static.conf  MAC GROUP IP   (optional fixed addresses)
+#   deny.txt     blocked MACs   (optional)
+#
+# All sh variables are global: helpers called from loops use their own prefixes (h_, p_, d_...).
 
 ST=/data/adb/multihotspot
 HD=/data/vendor/wifi/hostapd/mh
 CTRL_DIR=/data/vendor/wifi/hostapd/ctrl
 HOSTAPD=/vendor/bin/hw/hostapd
 DNSMASQ=/system/bin/dnsmasq
-PREF=21500
+PREF=21500     # ip rule: forwarded traffic from the AP -> upstream table
+TS_PREF=21400  # ip rule: groups with Tailscale access -> Tailscale VPN table (checked first)
 IPT="iptables -w"
 
 log() { echo "$(date '+%m-%d %H:%M:%S') $*" >> $ST/engine.log; }
-fail() { log "ERROR: $*"; echo "ERROR: $*"; echo failed > $ST/state; }
+fail() { log "ERROR: $*"; echo "ERROR: $*"; echo failed > $ST/state; echo "$*" > $ST/reason; }
 
 cfg() { sed -n "s/^$1=//p" $ST/cfg/engine.conf 2>/dev/null | head -1; }
 
 is_mac() { echo "$1" | grep -qiE '^([0-9a-f]{2}:){5}[0-9a-f]{2}$'; }
 
-alive() { [ -n "$1" ] && [ -d "/proc/$1" ]; }
+# pid exists AND its command line contains $2. Pid files survive reboots: never signal a recycled pid.
+pid_ok() { [ -n "$1" ] && [ -r "/proc/$1/cmdline" ] && tr '\0' ' ' < "/proc/$1/cmdline" | grep -q -- "$2"; }
 
 hostapd_pid() { pgrep -f "hostapd $HD/hostapd[.]conf" | head -1; }
+dnsmasq_pid() { d_p=$(cat $ST/dnsmasq.pid 2>/dev/null); pid_ok "$d_p" dnsmasq && echo "$d_p"; }
+daemon_alive() { pid_ok "$(cat $ST/daemon.pid 2>/dev/null)" "mh_engine"; }
+
+# Android's own hostapd service (Samsung Mobile Hotspot, Quick Share, Smart View...) shares the radio with us.
+system_hotspot_running() { [ "$(getprop init.svc.hostapd)" = running ]; }
+
+# settings wifi_on: 1 = on, 2 = on in airplane mode.
+wifi_is_on() { case "$(settings get global wifi_on 2>/dev/null)" in 1|2) return 0 ;; esac; return 1; }
+
+# Another tethering (USB, Bluetooth, Android hotspot) has rules in netd's chain besides the final DROP.
+other_tethering_active() { $IPT -S tetherctrl_FORWARD 2>/dev/null | grep -v -e '^-N ' -e '^-A tetherctrl_FORWARD -j DROP$' | grep -q .; }
+
+# in_cidr <ip> <net/prefix>
+in_cidr() {
+  awk -v ip="$1" -v cidr="$2" 'function n(a,  p) { split(a, p, "."); return ((p[1]*256 + p[2])*256 + p[3])*256 + p[4] }
+    BEGIN { split(cidr, c, "/"); m = 2 ^ (32 - c[2]); exit !(int(n(ip) / m) == int(n(c[1]) / m)) }'
+}
+
+# State left from before a reboot is meaningless (processes, sysctls, rules are gone).
+stale_boot() { [ -f $ST/boot_id ] && [ "$(cat $ST/boot_id)" != "$(cat /proc/sys/kernel/random/boot_id)" ]; }
+reset_stale() {
+  stale_boot || return 1
+  rm -f $ST/*.pid $ST/*.orig $ST/pins $ST/boot_id
+  : > $ST/connected; : > $ST/upstream; : > $ST/map
+  [ "$(cat $ST/state 2>/dev/null)" = stopped ] || echo stopped > $ST/state
+  return 0
+}
 
 # ---------------------------------------------------------------- groups
 
@@ -72,6 +104,34 @@ apply_upstream() {
   log "upstream -> $T"
 }
 
+# ---------------------------------------------------------------- tailscale
+# The Tailscale app is an Android VPN: its tun interface holds the node's 100.64.0.0/10 address and Android
+# keeps a routing table named after it with the tailnet routes. Groups with Tailscale access look that table
+# up first; destinations it doesn't cover fall through to the upstream rule.
+
+tailscale_iface() {
+  ip -4 -o addr show 2>/dev/null | awk '{ split($4, a, "/"); split(a[1], o, ".");
+    if (o[1] == 100 && o[2] >= 64 && o[2] <= 127) { print $2; exit } }'
+}
+
+apply_tailscale() {
+  IF=$(cfg IFACE)
+  a_ts=$(tailscale_iface)
+  a_want=$(awk '$1 !~ /^#/ && $12 == "1" {print $4}' $ST/cfg/groups.conf)
+  [ -z "$a_want" ] && a_ts=""
+  if [ "$a_ts" = "$(cat $ST/tailscale 2>/dev/null)" ] && { [ -z "$a_ts" ] || ip rule | grep -q "^$TS_PREF:"; }; then
+    return 0
+  fi
+  while ip rule del pref $TS_PREF 2>/dev/null; do :; done
+  if [ -n "$a_ts" ]; then
+    for a_net in $a_want; do ip rule add pref $TS_PREF from $a_net iif $IF lookup $a_ts; done
+    log "tailscale -> $a_ts"
+  elif [ -n "$a_want" ] && [ -s $ST/tailscale ]; then
+    log "tailscale disconnected"
+  fi
+  echo "$a_ts" > $ST/tailscale
+}
+
 # ---------------------------------------------------------------- firewall
 
 fw_teardown() {
@@ -100,11 +160,17 @@ fw_setup() {
   # Forwarding: anti-spoof first, then replies, then per-group policy.
   $IPT -A mh_FWD -i $IF -j mh_SRC
   $IPT -A mh_FWD -o $IF -m state --state ESTABLISHED,RELATED -j ACCEPT
-  while read -r id gw pfx net mask inet iso ds de lt dns; do
+  while read -r id gw pfx net mask inet iso ds de lt dns ts; do
     case "$id" in ''|\#*) continue ;; esac
     [ "$iso" = 0 ] && $IPT -A mh_FWD -i $IF -o $IF -s $net -d $net -j ACCEPT
-    if [ "$inet" = 1 ]; then
-      $IPT -A mh_FWD -i $IF ! -o $IF -s $net -j ACCEPT
+    # Tailscale (tun*): only groups that have it enabled, regardless of their internet setting.
+    if [ "$ts" = 1 ]; then
+      $IPT -A mh_FWD -i $IF -o tun+ -s $net -j ACCEPT
+    else
+      $IPT -A mh_FWD -i $IF -o tun+ -s $net -j DROP
+    fi
+    [ "$inet" = 1 ] && $IPT -A mh_FWD -i $IF ! -o $IF -s $net -j ACCEPT
+    if [ "$inet" = 1 ] || [ "$ts" = 1 ]; then
       $IPT -t nat -A mh_NAT -s $net ! -o $IF -j MASQUERADE
     fi
   done < $ST/cfg/groups.conf
@@ -129,14 +195,49 @@ fw_hooks_ok() {
     && $IPT -t nat -C POSTROUTING -j mh_NAT 2>/dev/null
 }
 
+src_rule_del() {
+  $IPT -S mh_SRC 2>/dev/null | grep -i -- "--mac-source $1 " | sed 's/^-A /-D /' | while read -r s_r; do
+    $IPT $s_r
+  done
+}
+
 # Allow <mac> to send only from <group>'s subnet.
 src_rule() {
-  mac=$1; grp=$2
-  $IPT -S mh_SRC 2>/dev/null | grep -i -- "--mac-source $mac " | sed 's/^-A /-D /' | while read -r r; do
-    $IPT $r
-  done
-  net=$(group_field "$grp" 4)
-  [ -n "$net" ] && $IPT -I mh_SRC 1 -s "$net" -m mac --mac-source "$mac" -j RETURN
+  src_rule_del "$1"
+  s_net=$(group_field "$2" 4)
+  [ -n "$s_net" ] && $IPT -I mh_SRC 1 -s "$s_net" -m mac --mac-source "$1" -j RETURN
+}
+
+# ---------------------------------------------------------------- ARP pinning
+# Clients can't spoof IPv4 sources (mh_SRC), but ARP isn't filtered: a guest could claim a home device's IP
+# in an ARP request and the phone would then send that device's traffic to the guest. Pin a permanent
+# neighbour entry for every connected client's current lease; permanent entries ignore ARP updates.
+
+pin_leases() {
+  IF=$(cfg IFACE)
+  : > $ST/pins.new
+  while read -r p_mac p_grp p_since; do
+    [ -z "$p_mac" ] && continue
+    p_net=$(group_field "$p_grp" 4)
+    for p_ip in $(awk -v m="$p_mac" 'tolower($2)==m {print $3}' $ST/dnsmasq.leases 2>/dev/null); do
+      in_cidr "$p_ip" "$p_net" || continue
+      echo "$p_mac $p_ip" >> $ST/pins.new
+      ip neigh replace "$p_ip" lladdr "$p_mac" dev $IF nud permanent 2>/dev/null
+      break
+    done
+  done < $ST/connected
+  if [ -f $ST/pins ]; then
+    while read -r o_mac o_ip; do
+      grep -q "^$o_mac $o_ip\$" $ST/pins.new || ip neigh del "$o_ip" dev $IF 2>/dev/null
+    done < $ST/pins
+  fi
+  mv $ST/pins.new $ST/pins
+}
+
+unpin_mac() {
+  [ -f $ST/pins ] || return
+  grep "^$1 " $ST/pins | while read -r u_mac u_ip; do ip neigh del "$u_ip" dev $(cfg IFACE) 2>/dev/null; done
+  grep -v "^$1 " $ST/pins > $ST/pins.tmp; mv $ST/pins.tmp $ST/pins
 }
 
 # ---------------------------------------------------------------- dhcp
@@ -162,9 +263,9 @@ gen_dnsmasq() {
   } > $ST/dnsmasq.conf
 }
 
-# hosts.dhcp: every mapped client gets its group's tag (plus a fixed IP if configured).
+# hosts.dhcp: every connected client gets its group's tag (plus a fixed IP if configured).
+# Unknown MACs get no DHCP at all (dhcp-ignore=#known).
 gen_hosts() {
-  # (shell variables are global: use h_* names so callers' mac/grp survive)
   : > $ST/hosts.tmp
   while read -r h_mac h_grp; do
     [ -z "$h_mac" ] && continue
@@ -176,15 +277,15 @@ gen_hosts() {
     fi
   done < $ST/map
   mv $ST/hosts.tmp $ST/hosts.dhcp
-  P=$(cat $ST/dnsmasq.pid 2>/dev/null)
-  alive "$P" && kill -HUP "$P"
+  h_p=$(dnsmasq_pid)
+  [ -n "$h_p" ] && kill -HUP "$h_p"
 }
 
 start_dnsmasq() {
   # dnsmasq daemonizes; never capture its output with $(...) or the shell waits on the pipe forever.
   $DNSMASQ -C $ST/dnsmasq.conf </dev/null >$ST/dnsmasq.out 2>&1
   sleep 1
-  if ! alive "$(cat $ST/dnsmasq.pid 2>/dev/null)"; then
+  if [ -z "$(dnsmasq_pid)" ]; then
     log "dnsmasq failed: $(head -c 300 $ST/dnsmasq.out)"
     return 1
   fi
@@ -206,11 +307,13 @@ on_connect() {
 
   grep -v "^$mac " $ST/map > $ST/map.tmp 2>/dev/null; echo "$mac $grp" >> $ST/map.tmp; mv $ST/map.tmp $ST/map
   grep -v "^$mac " $ST/connected > $ST/conn.tmp 2>/dev/null; echo "$mac $grp $(date +%s)" >> $ST/conn.tmp; mv $ST/conn.tmp $ST/connected
+  unpin_mac "$mac"
   src_rule "$mac" "$grp"
   gen_hosts
   log "connect $mac group=$grp"
 }
 
+# Forget everything about a client when it leaves, so a device cloning its MAC can't inherit its group.
 on_disconnect() {
   mac=""; next=0
   for w in $1; do
@@ -220,26 +323,99 @@ on_disconnect() {
   is_mac "$mac" || return
   mac=$(echo "$mac" | tr 'A-F' 'a-f')
   grep -v "^$mac " $ST/connected > $ST/conn.tmp 2>/dev/null; mv $ST/conn.tmp $ST/connected
+  grep -v "^$mac " $ST/map > $ST/map.tmp 2>/dev/null; mv $ST/map.tmp $ST/map
+  src_rule_del "$mac"
+  unpin_mac "$mac"
+  gen_hosts
   log "disconnect $mac"
+}
+
+# Undo every network change. "soft": leave the interface itself alone (another hostapd may own it now).
+net_teardown() {
+  t_if=$(cfg IFACE)
+  t_p=$(dnsmasq_pid); [ -n "$t_p" ] && kill "$t_p" 2>/dev/null
+  pkill -f "dnsmasq -C $ST/dnsmasq[.]conf" 2>/dev/null
+  rm -f $ST/dnsmasq.pid
+
+  fw_teardown
+  while ip rule del pref $PREF 2>/dev/null; do :; done
+  while ip rule del pref $TS_PREF 2>/dev/null; do :; done
+  : > $ST/tailscale 2>/dev/null
+
+  if [ -n "$t_if" ] && [ -f $ST/cfg/groups.conf ]; then
+    while read -r id gw pfx net rest; do
+      case "$id" in ''|\#*) continue ;; esac
+      ip route del $net dev $t_if table local_network 2>/dev/null
+      ip addr del $gw/$pfx dev $t_if 2>/dev/null
+    done < $ST/cfg/groups.conf
+    ip neigh flush dev $t_if nud permanent 2>/dev/null
+    rm -f $ST/pins
+    echo 0 > /proc/sys/net/ipv4/conf/$t_if/proxy_arp 2>/dev/null
+    echo 0 > /proc/sys/net/ipv4/conf/$t_if/proxy_arp_pvlan 2>/dev/null
+    if [ -f $ST/disable_ipv6.orig ]; then
+      cat $ST/disable_ipv6.orig > /proc/sys/net/ipv6/conf/$t_if/disable_ipv6 2>/dev/null
+      rm -f $ST/disable_ipv6.orig
+    fi
+    if [ "$1" != soft ]; then
+      ip addr flush dev $t_if 2>/dev/null
+      ip link set $t_if down 2>/dev/null
+      rm -f $CTRL_DIR/$t_if
+    fi
+  fi
+
+  # Leave forwarding on if another tethering needs it; netd turns it off itself later.
+  if [ -f $ST/ip_forward.orig ]; then
+    if [ "$(cat $ST/ip_forward.orig)" = 1 ] || ! other_tethering_active; then
+      cat $ST/ip_forward.orig > /proc/sys/net/ipv4/ip_forward
+    fi
+    rm -f $ST/ip_forward.orig
+  fi
+  [ -f $ST/send_redirects.orig ] && cat $ST/send_redirects.orig > /proc/sys/net/ipv4/conf/all/send_redirects && rm -f $ST/send_redirects.orig
+  : > $ST/connected 2>/dev/null; : > $ST/map 2>/dev/null; : > $ST/upstream 2>/dev/null
+}
+
+restore_wifi() {
+  if [ -f $ST/wifi_was_on ]; then
+    rm -f $ST/wifi_was_on
+    cmd wifi set-wifi-enabled enabled
+  fi
 }
 
 watchdog() {
   IF=$(cfg IFACE)
   while true; do
-    sleep 10
+    sleep 5
     [ "$(cat $ST/state 2>/dev/null)" = running ] || continue
-    if ! alive "$(hostapd_pid)"; then
-      log "hostapd died"
+    if [ -z "$(hostapd_pid)" ]; then
+      if system_hotspot_running; then
+        w_reason="The phone's built-in hotspot (or a Samsung feature using it, e.g. Quick Share / Smart View) took over the Wi-Fi radio. Turn it off, then start again."
+      else
+        w_reason="The access point stopped unexpectedly (driver or radio reset). Start again; see Log for details."
+      fi
+      log "hostapd died - cleaning up: $w_reason"
+      # Clean up once (firewall, DHCP, routes, Wi-Fi-off) and leave the radio to whoever has it now.
+      net_teardown soft
+      restore_wifi
       echo failed > $ST/state
-      continue
+      echo "$w_reason" > $ST/reason
+      w_p=$(cat $ST/daemon.pid 2>/dev/null); pid_ok "$w_p" mh_engine && kill "$w_p" 2>/dev/null
+      pkill -f "logcat -T 1 -b main -s hostap[d]" 2>/dev/null
+      rm -f $ST/daemon.pid $ST/watchdog.pid
+      exit 0
     fi
-    if ! alive "$(cat $ST/dnsmasq.pid 2>/dev/null)"; then
+    if [ -z "$(dnsmasq_pid)" ]; then
       log "dnsmasq died - restarting"
       start_dnsmasq
     fi
     apply_upstream
+    apply_tailscale
     [ "$(cat /proc/sys/net/ipv4/ip_forward)" = 1 ] || { echo 1 > /proc/sys/net/ipv4/ip_forward; log "ip_forward re-enabled"; }
-    fw_hooks_ok || { log "firewall hooks missing - rebuilding"; fw_setup "$IF"; while read -r m g; do src_rule "$m" "$g"; done < $ST/map; }
+    if ! fw_hooks_ok; then
+      log "firewall hooks missing - rebuilding"
+      fw_setup "$IF"
+      while read -r w_m w_g w_s; do [ -n "$w_m" ] && src_rule "$w_m" "$w_g"; done < $ST/connected
+    fi
+    pin_leases
   done
 }
 
@@ -259,19 +435,31 @@ daemon() {
   done
 }
 
+kill_engine_procs() {
+  for f in watchdog daemon; do
+    k_p=$(cat $ST/$f.pid 2>/dev/null); pid_ok "$k_p" mh_engine && kill "$k_p" 2>/dev/null
+    rm -f $ST/$f.pid
+  done
+  pkill -f "mh_engine[.]sh daemon" 2>/dev/null
+  pkill -f "logcat -T 1 -b main -s hostap[d]" 2>/dev/null
+  pkill -f "hostapd $HD/hostapd[.]conf" 2>/dev/null
+}
+
 # ---------------------------------------------------------------- start / stop
 
 start() {
   CFG=$1
   [ -f "$CFG/engine.conf" ] && [ -f "$CFG/hostapd.conf" ] && [ -f "$CFG/groups.conf" ] || { echo "ERROR: bad config dir"; exit 1; }
-  stop >/dev/null 2>&1
+  # Restart: undo the previous run but don't toggle Wi-Fi back on (handled below).
+  stop keepwifi >/dev/null 2>&1
 
   mkdir -p $ST $HD; chmod 700 $ST
   rm -rf $ST/cfg; mkdir $ST/cfg; cp "$CFG"/* $ST/cfg/
   [ "$(readlink -f "$0")" != "$ST/mh_engine.sh" ] && cp "$0" $ST/mh_engine.sh
   : > $ST/engine.log; : > $ST/map; : > $ST/connected; : > $ST/hosts.dhcp; : > $ST/upstream
   touch $ST/cfg/static.conf
-  echo starting > $ST/state
+  cat /proc/sys/kernel/random/boot_id > $ST/boot_id
+  echo starting > $ST/state; rm -f $ST/reason
 
   IF=$(cfg IFACE); MAC=$(cfg MAC); WM=$(cfg WIFI_MODE)
   [ -d /sys/class/net/$IF ] || { fail "interface $IF not found"; exit 1; }
@@ -283,16 +471,22 @@ start() {
   chown -R wifi:wifi $HD; chmod 770 $HD; chmod 660 $HD/*; restorecon -R $HD
 
   cmd wifi stop-softap >/dev/null 2>&1
-  if [ "$WM" = off ] && cmd wifi status 2>/dev/null | grep -q "Wifi is enabled"; then
-    touch $ST/wifi_was_on
-    cmd wifi set-wifi-enabled disabled
-    sleep 3
+  if [ "$WM" = off ]; then
+    if [ ! -f $ST/wifi_was_on ] && wifi_is_on; then
+      touch $ST/wifi_was_on
+      cmd wifi set-wifi-enabled disabled
+      n=0; while [ $n -lt 8 ] && cmd wifi status 2>/dev/null | grep -q "Wifi is enabled"; do sleep 1; n=$((n+1)); done
+      sleep 1
+    fi
+  elif [ -f $ST/wifi_was_on ]; then
+    restore_wifi
   fi
 
   cat /proc/sys/net/ipv4/ip_forward > $ST/ip_forward.orig
   cat /proc/sys/net/ipv4/conf/all/send_redirects > $ST/send_redirects.orig
 
-  # Event loop must be running before the AP accepts clients.
+  # Firewall and event loop must be in place before the AP accepts its first client.
+  fw_setup $IF
   setsid sh $ST/mh_engine.sh daemon </dev/null >/dev/null 2>&1 &
 
   ip link set $IF down
@@ -303,15 +497,19 @@ start() {
   n=0; up=0
   while [ $n -lt 15 ]; do
     sleep 1; n=$((n+1))
-    alive "$(hostapd_pid)" || break
+    [ -n "$(hostapd_pid)" ] || break
     [ "$(cat /sys/class/net/$IF/operstate 2>/dev/null)" = up ] && { up=1; break; }
   done
   if [ $up != 1 ]; then
-    fail "access point did not start (driver refused the settings - see logcat tag hostapd)"
-    stop >/dev/null 2>&1; echo failed > $ST/state
+    stop >/dev/null 2>&1
+    fail "access point did not start (the Wi-Fi driver refused the settings - see the radio log)"
     exit 1
   fi
   log "AP up after ${n}s"
+
+  # IPv4 only: the firewall is iptables (not ip6tables), so don't let clients reach the phone over IPv6 link-local.
+  cat /proc/sys/net/ipv6/conf/$IF/disable_ipv6 > $ST/disable_ipv6.orig 2>/dev/null
+  echo 1 > /proc/sys/net/ipv6/conf/$IF/disable_ipv6
 
   ip addr flush dev $IF
   while read -r id gw pfx net mask inet iso ds de lt dns; do
@@ -330,13 +528,13 @@ start() {
   echo 0 > /proc/sys/net/ipv4/conf/all/send_redirects
   echo 1 > /proc/sys/net/ipv4/ip_forward
 
-  fw_setup $IF
   apply_upstream || log "no upstream yet - will retry"
+  apply_tailscale
 
   gen_dnsmasq $IF
   if ! start_dnsmasq; then
+    stop >/dev/null 2>&1
     fail "DHCP server failed to start"
-    stop >/dev/null 2>&1; echo failed > $ST/state
     exit 1
   fi
 
@@ -345,61 +543,51 @@ start() {
   echo "OK"
 }
 
+# stop [keepwifi]
 stop() {
-  IF=$(cfg IFACE)
-  for f in watchdog daemon; do
-    P=$(cat $ST/$f.pid 2>/dev/null); alive "$P" && kill "$P" 2>/dev/null
-    rm -f $ST/$f.pid
-  done
-  pkill -f "mh_engine[.]sh daemon" 2>/dev/null
-  pkill -f "logcat -T 1 -b main -s hostap[d]" 2>/dev/null
-  pkill -f "hostapd $HD/hostapd[.]conf" 2>/dev/null
-  P=$(cat $ST/dnsmasq.pid 2>/dev/null); alive "$P" && kill "$P" 2>/dev/null
-  pkill -f "dnsmasq -C $ST/dnsmasq[.]conf" 2>/dev/null
-  rm -f $ST/dnsmasq.pid
-
-  fw_teardown
-  while ip rule del pref $PREF 2>/dev/null; do :; done
-
-  if [ -n "$IF" ]; then
-    while read -r id gw pfx net rest; do
-      case "$id" in ''|\#*) continue ;; esac
-      ip route del $net dev $IF table local_network 2>/dev/null
-    done < $ST/cfg/groups.conf
-    ip addr flush dev $IF 2>/dev/null
-    ip link set $IF down 2>/dev/null
-    echo 0 > /proc/sys/net/ipv4/conf/$IF/proxy_arp 2>/dev/null
-    echo 0 > /proc/sys/net/ipv4/conf/$IF/proxy_arp_pvlan 2>/dev/null
-    rm -f $CTRL_DIR/$IF
-  fi
-  [ -f $ST/ip_forward.orig ] && cat $ST/ip_forward.orig > /proc/sys/net/ipv4/ip_forward && rm -f $ST/ip_forward.orig
-  [ -f $ST/send_redirects.orig ] && cat $ST/send_redirects.orig > /proc/sys/net/ipv4/conf/all/send_redirects && rm -f $ST/send_redirects.orig
-  if [ -f $ST/wifi_was_on ]; then
-    rm -f $ST/wifi_was_on
-    cmd wifi set-wifi-enabled enabled
-  fi
-  : > $ST/connected 2>/dev/null; : > $ST/upstream 2>/dev/null
-  [ "$(cat $ST/state 2>/dev/null)" = failed ] || echo stopped > $ST/state
+  reset_stale >/dev/null
+  kill_engine_procs
+  net_teardown
+  [ "$1" = keepwifi ] || restore_wifi
+  echo stopped > $ST/state; rm -f $ST/reason $ST/boot_id
   log "stopped"
   echo "OK"
 }
 
 status() {
-  echo "STATE=$(cat $ST/state 2>/dev/null || echo stopped)"
+  reset_stale >/dev/null
+  s_state=$(cat $ST/state 2>/dev/null || echo stopped)
+  s_hp=0; [ -n "$(hostapd_pid)" ] && s_hp=1
+  s_dp=0; [ -n "$(dnsmasq_pid)" ] && s_dp=1
+  s_da=0; daemon_alive && s_da=1
+  s_reason=$(head -n 1 $ST/reason 2>/dev/null)
+  if [ "$s_state" = running ] && { [ $s_hp = 0 ] || [ $s_da = 0 ]; }; then
+    s_state=failed
+    [ -n "$s_reason" ] || s_reason="The hotspot processes are no longer running."
+  fi
+  echo "STATE=$s_state"
+  [ -n "$s_reason" ] && echo "REASON=$s_reason"
   echo "IFACE=$(cfg IFACE)"
   echo "UPSTREAM=$(cat $ST/upstream 2>/dev/null)"
-  alive "$(hostapd_pid)" && echo "HOSTAPD=1" || echo "HOSTAPD=0"
-  alive "$(cat $ST/dnsmasq.pid 2>/dev/null)" && echo "DHCP=1" || echo "DHCP=0"
-  alive "$(cat $ST/daemon.pid 2>/dev/null)" && echo "DAEMON=1" || echo "DAEMON=0"
+  echo "TAILSCALE=$(cat $ST/tailscale 2>/dev/null)"
+  echo "HOSTAPD=$s_hp"
+  echo "DHCP=$s_dp"
+  echo "DAEMON=$s_da"
   # Bytes sent by each client (counter of its anti-spoof rule).
   # iptables prints the match as "MACaa:bb:..." (some builds: "MAC aa:bb:...").
   $IPT -L mh_SRC -v -x -n 2>/dev/null | awk '$3=="RETURN" {for(i=1;i<=NF;i++) if($i ~ /^MAC/) {m=substr($i,4); if(m=="") m=$(i+1); print tolower(m), $2}}' > $ST/bytes.tmp
-  while read -r mac grp since; do
-    [ -z "$mac" ] && continue
-    ip=$(awk -v m="$mac" 'tolower($2)==m {print $3; exit}' $ST/dnsmasq.leases 2>/dev/null)
-    host=$(awk -v m="$mac" 'tolower($2)==m {print $4; exit}' $ST/dnsmasq.leases 2>/dev/null)
-    up=$(awk -v m="$mac" '$1==m {print $2; exit}' $ST/bytes.tmp)
-    echo "CLIENT $mac $grp ${ip:--} ${host:--} $since ${up:-0}"
+  while read -r c_mac c_grp c_since; do
+    [ -z "$c_mac" ] && continue
+    c_net=$(group_field "$c_grp" 4)
+    c_ip=""; c_host=""
+    # The lease file can still hold an old lease from another group: take the one inside this group's subnet.
+    while read -r l_exp l_mac l_ip l_host l_rest; do
+      [ "$(echo "$l_mac" | tr 'A-F' 'a-f')" = "$c_mac" ] || continue
+      in_cidr "$l_ip" "$c_net" || continue
+      c_ip=$l_ip; c_host=$l_host; break
+    done < $ST/dnsmasq.leases 2>/dev/null
+    c_up=$(awk -v m="$c_mac" '$1==m {print $2; exit}' $ST/bytes.tmp)
+    echo "CLIENT $c_mac $c_grp ${c_ip:--} ${c_host:--} $c_since ${c_up:-0}"
   done < $ST/connected
   rm -f $ST/bytes.tmp
   echo "LOG_BEGIN"

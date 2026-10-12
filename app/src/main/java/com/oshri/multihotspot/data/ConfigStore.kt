@@ -46,6 +46,7 @@ class ConfigStore(private val file: File) {
                         put("leaseHours", g.leaseHours); put("internet", g.internet)
                         put("devicesSeeEachOther", g.devicesSeeEachOther)
                         put("dns1", g.dns1); put("dns2", g.dns2)
+                        put("tailscale", g.tailscale)
                     })
                 }
             })
@@ -69,6 +70,7 @@ class ConfigStore(private val file: File) {
                         leaseHours = g.optInt("leaseHours", 12), internet = g.optBoolean("internet", true),
                         devicesSeeEachOther = g.optBoolean("devicesSeeEachOther", true),
                         dns1 = g.optString("dns1", "1.1.1.1"), dns2 = g.optString("dns2", ""),
+                        tailscale = g.optBoolean("tailscale", false),
                     )
                 }
             } ?: def.groups

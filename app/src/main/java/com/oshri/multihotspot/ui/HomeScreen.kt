@@ -5,6 +5,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.Row
@@ -27,6 +29,7 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -74,9 +77,10 @@ import com.oshri.multihotspot.model.Group
 import com.oshri.multihotspot.model.Ipv4
 import com.oshri.multihotspot.model.StaticLease
 import com.oshri.multihotspot.model.Validation
+import com.oshri.multihotspot.model.normalized
 import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun HomeScreen(onSettings: () -> Unit, onLog: () -> Unit, onEditGroup: (String?) -> Unit) {
     val config by HotspotController.config.collectAsStateWithLifecycle()
@@ -90,6 +94,7 @@ fun HomeScreen(onSettings: () -> Unit, onLog: () -> Unit, onEditGroup: (String?)
     val problems = remember(config) { Validation.config(config) }
 
     var fixedIpFor by remember { mutableStateOf<Client?>(null) }
+    var qrFor by remember { mutableStateOf<Group?>(null) }
     var blockFor by remember { mutableStateOf<Client?>(null) }
 
     Scaffold(
@@ -121,16 +126,21 @@ fun HomeScreen(onSettings: () -> Unit, onLog: () -> Unit, onEditGroup: (String?)
             item {
                 StatusCard(
                     state = status.state,
+                    reason = status.reason,
                     ssid = config.ssid,
                     channel = config.channel,
                     upstream = status.upstream,
                     devices = status.clients.size,
                     busy = busy,
                     // applied == null while running: started outside the app (or app data cleared) - offer to apply ours.
-                    pendingChanges = status.state == EngineState.RUNNING && applied != config,
+                    pendingChanges = status.state == EngineState.RUNNING && applied?.normalized() != config.normalized(),
                     canStart = problems.isEmpty() && root != false,
-                    onStart = { scope.launch { HotspotController.start() } },
-                    onStop = { scope.launch { HotspotController.stop() } },
+                    // Something may still be up after a failure: always allow cleaning up.
+                    canStop = status.state == EngineState.RUNNING || status.hostapdAlive || status.dhcpAlive || status.daemonAlive,
+                    tailscaleWanted = config.groups.any { it.tailscale },
+                    tailscaleIface = status.tailscale,
+                    onStart = { HotspotController.startAsync() },
+                    onStop = { HotspotController.stopAsync() },
                 )
             }
 
@@ -154,7 +164,9 @@ fun HomeScreen(onSettings: () -> Unit, onLog: () -> Unit, onEditGroup: (String?)
                     group = g,
                     color = groupColor(idx),
                     connected = status.clients.count { it.groupId == g.id },
+                    strictIsolation = config.strictIsolation,
                     onEdit = { onEditGroup(g.id) },
+                    onQr = { qrFor = g },
                 )
             }
 
@@ -199,6 +211,9 @@ fun HomeScreen(onSettings: () -> Unit, onLog: () -> Unit, onEditGroup: (String?)
             },
         )
     }
+    qrFor?.let { g ->
+        WifiQrDialog(ssid = config.ssid, networkName = g.name, password = g.password, hidden = config.hidden, onDismiss = { qrFor = null })
+    }
     blockFor?.let { c ->
         AlertDialog(
             onDismissRequest = { blockFor = null },
@@ -219,6 +234,7 @@ fun HomeScreen(onSettings: () -> Unit, onLog: () -> Unit, onEditGroup: (String?)
 @Composable
 private fun StatusCard(
     state: EngineState,
+    reason: String,
     ssid: String,
     channel: Int,
     upstream: String,
@@ -226,6 +242,9 @@ private fun StatusCard(
     busy: String?,
     pendingChanges: Boolean,
     canStart: Boolean,
+    canStop: Boolean,
+    tailscaleWanted: Boolean,
+    tailscaleIface: String,
     onStart: () -> Unit,
     onStop: () -> Unit,
 ) {
@@ -261,6 +280,18 @@ private fun StatusCard(
                         (if (upstream.isBlank()) "No internet source" else "Internet via $upstream") + " · $devices device${if (devices == 1) "" else "s"}",
                         style = MaterialTheme.typography.bodyMedium,
                     )
+                    if (running && tailscaleWanted) Text(
+                        if (tailscaleIface.isNotBlank()) "Tailscale connected ($tailscaleIface)"
+                        else "Tailscale not connected - open the Tailscale app and connect",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (tailscaleIface.isNotBlank()) Color.Unspecified else MaterialTheme.colorScheme.error,
+                    )
+                    if (state == EngineState.FAILED && reason.isNotBlank()) Text(
+                        reason,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
                 }
             }
             if (busy != null) {
@@ -275,6 +306,7 @@ private fun StatusCard(
                     if (pendingChanges) Button(onClick = onStart, enabled = busy == null && canStart) { Text("Apply changes") }
                 } else {
                     Button(onClick = onStart, enabled = busy == null && canStart) { Text("Start hotspot") }
+                    if (canStop) OutlinedButton(onClick = onStop, enabled = busy == null) { Text("Stop / clean up") }
                 }
             }
             if (pendingChanges) Text(
@@ -286,8 +318,9 @@ private fun StatusCard(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun GroupCard(group: Group, color: Color, connected: Int, onEdit: () -> Unit) {
+private fun GroupCard(group: Group, color: Color, connected: Int, strictIsolation: Boolean, onEdit: () -> Unit, onQr: () -> Unit) {
     var showPw by remember { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
     Card(Modifier.fillMaxWidth().clickable(onClick = onEdit)) {
@@ -312,13 +345,23 @@ private fun GroupCard(group: Group, color: Color, connected: Int, onEdit: () -> 
                     IconButton(onClick = { showPw = !showPw }) {
                         Icon(if (showPw) Icons.Default.VisibilityOff else Icons.Default.Visibility, contentDescription = "Show password")
                     }
+                    IconButton(onClick = onQr) {
+                        Icon(Icons.Default.QrCode2, contentDescription = "Show QR code for ${group.name}")
+                    }
                     IconButton(onClick = { clipboard.setText(AnnotatedString(group.password)) }) {
                         Icon(Icons.Default.ContentCopy, contentDescription = "Copy password")
                     }
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Tag(if (group.internet) "Internet" else "No internet")
-                    Tag(if (group.devicesSeeEachOther) "Devices see each other" else "Devices isolated")
+                    if (group.tailscale) Tag("Tailscale")
+                    Tag(
+                        when {
+                            !strictIsolation -> "Not isolated (strict isolation off)"
+                            group.devicesSeeEachOther -> "Devices see each other"
+                            else -> "Devices isolated"
+                        }
+                    )
                     if (connected > 0) Tag("$connected online")
                 }
             }

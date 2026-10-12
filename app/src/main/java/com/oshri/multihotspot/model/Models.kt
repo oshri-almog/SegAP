@@ -17,6 +17,8 @@ data class Group(
     val devicesSeeEachOther: Boolean = true,
     val dns1: String = "1.1.1.1",
     val dns2: String = "8.8.8.8",
+    /** Devices in this group can reach the Tailscale network the phone is signed in to. */
+    val tailscale: Boolean = false,
 ) {
     val networkCidr: String
         get() {
@@ -84,6 +86,12 @@ data class HotspotConfig(
     }
 }
 
+/** Order-insensitive form, so re-saving the same settings doesn't look like a change. */
+fun HotspotConfig.normalized(): HotspotConfig = copy(
+    staticLeases = staticLeases.sortedWith(compareBy({ it.groupId }, { it.mac })),
+    blockedMacs = blockedMacs.map { it.lowercase() }.sorted(),
+)
+
 /** Suggests the next free 192.168.N.0/24 block for a new group. */
 fun HotspotConfig.suggestNewGroup(name: String): Group {
     val used = groups.mapNotNull { Ipv4.parse(it.gateway) }.map { (it shr 8) and 255 }.toSet()
@@ -119,8 +127,12 @@ data class Client(
 
 data class EngineStatus(
     val state: EngineState = EngineState.UNKNOWN,
+    /** Why the engine is in FAILED state (from the engine), if known. */
+    val reason: String = "",
     val iface: String = "",
     val upstream: String = "",
+    /** Tailscale VPN interface the engine routes to (empty = not connected / not used). */
+    val tailscale: String = "",
     val hostapdAlive: Boolean = false,
     val dhcpAlive: Boolean = false,
     val daemonAlive: Boolean = false,
@@ -158,8 +170,10 @@ data class EngineStatus(
                                 "stopped" -> EngineState.STOPPED
                                 else -> EngineState.UNKNOWN
                             })
+                            "REASON" -> s.copy(reason = v)
                             "IFACE" -> s.copy(iface = v)
                             "UPSTREAM" -> s.copy(upstream = v)
+                            "TAILSCALE" -> s.copy(tailscale = v)
                             "HOSTAPD" -> s.copy(hostapdAlive = v == "1")
                             "DHCP" -> s.copy(dhcpAlive = v == "1")
                             "DAEMON" -> s.copy(daemonAlive = v == "1")

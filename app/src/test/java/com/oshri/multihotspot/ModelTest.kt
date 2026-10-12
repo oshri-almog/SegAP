@@ -11,6 +11,7 @@ import com.oshri.multihotspot.model.Mac
 import com.oshri.multihotspot.model.StaticLease
 import com.oshri.multihotspot.model.Validation
 import com.oshri.multihotspot.model.WifiMode
+import com.oshri.multihotspot.model.normalized
 import com.oshri.multihotspot.model.suggestNewGroup
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -111,8 +112,12 @@ class ModelTest {
         assertTrue(hostapd.contains("deny_mac_file="))
 
         val groups = ConfigWriter.groupsConf(c).trim().lines()
-        assertEquals("g1 192.168.10.1 24 192.168.10.0/24 255.255.255.0 1 0 192.168.10.100 192.168.10.200 12h 1.1.1.1,8.8.8.8", groups[0])
-        assertEquals("g2 192.168.20.1 24 192.168.20.0/24 255.255.255.0 0 1 192.168.20.100 192.168.20.200 12h 1.1.1.1,8.8.8.8", groups[1])
+        assertEquals("g1 192.168.10.1 24 192.168.10.0/24 255.255.255.0 1 0 192.168.10.100 192.168.10.200 12h 1.1.1.1,8.8.8.8 0", groups[0])
+        assertEquals("g2 192.168.20.1 24 192.168.20.0/24 255.255.255.0 0 1 192.168.20.100 192.168.20.200 12h 1.1.1.1,8.8.8.8 0", groups[1])
+        val ts = c.copy(groups = c.groups.map { if (it.id == "g2") it.copy(tailscale = true) else it })
+        assertTrue(ConfigWriter.groupsConf(ts).trim().lines()[1].endsWith(" 1"))
+        // engine reads 12 whitespace-separated columns: no field may contain spaces
+        ConfigWriter.groupsConf(ts).trim().lines().forEach { assertEquals(12, it.split(" ").size) }
         assertEquals("keyid=g1 00:00:00:00:00:00 password-g1", ConfigWriter.pskFile(c).lines()[0])
         assertEquals("aa:bb:cc:dd:ee:ff\n", ConfigWriter.denyFile(c))
         assertEquals("g2", ConfigWriter.defaultGroupId(c)) // most restricted
@@ -144,9 +149,35 @@ class ModelTest {
         assertEquals(1, s.log.size)
     }
 
+    @Test fun wifiQrPayloadEscapes() {
+        assertEquals("WIFI:T:WPA;S:Home;P:abc12345;;", com.oshri.multihotspot.ui.wifiQrPayload("Home", "abc12345", false))
+        assertEquals(
+            "WIFI:T:WPA;S:a\\;b\\,c\\:d;P:p\\\\w\\\"x;H:true;;",
+            com.oshri.multihotspot.ui.wifiQrPayload("a;b,c:d", "p\\w\"x", true),
+        )
+    }
+
+    @Test fun normalizedIgnoresOrder() {
+        val a = HotspotConfig.default().copy(
+            staticLeases = listOf(StaticLease("aa:aa:aa:aa:aa:aa", "g1", "192.168.10.5"), StaticLease("bb:bb:bb:bb:bb:bb", "g2", "192.168.20.5")),
+            blockedMacs = listOf("CC:CC:CC:CC:CC:CC", "11:11:11:11:11:11"),
+        )
+        val b = a.copy(staticLeases = a.staticLeases.reversed(), blockedMacs = listOf("11:11:11:11:11:11", "cc:cc:cc:cc:cc:cc"))
+        assertTrue(a != b)
+        assertEquals(a.normalized(), b.normalized())
+    }
+
+    @Test fun statusParsesReasonAndTailscale() {
+        val s = EngineStatus.parse("STATE=failed\nREASON=The radio was taken over\nTAILSCALE=tun0\nHOSTAPD=0")
+        assertEquals(EngineState.FAILED, s.state)
+        assertEquals("The radio was taken over", s.reason)
+        assertEquals("tun0", s.tailscale)
+    }
+
     @Test fun configStoreRoundTrip() {
         val c = HotspotConfig.default().copy(
             ssid = "Round ✓", channel = 11, hidden = true, wifiMode = WifiMode.OFF, strictIsolation = false,
+            groups = HotspotConfig.default().groups.map { it.copy(tailscale = it.id == "g1") },
             staticLeases = listOf(StaticLease("aa:bb:cc:dd:ee:ff", "g1", "192.168.10.50", "TV")),
             blockedMacs = listOf("11:22:33:44:55:66"),
         )

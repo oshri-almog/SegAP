@@ -36,17 +36,25 @@ class HotspotService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    private var foregroundFailed = false
+
     override fun onCreate() {
         super.onCreate()
         running = true
         createChannel(this)
-        ServiceCompat.startForeground(
-            this, NOTIFICATION_ID, buildNotification("Starting..."),
-            if (Build.VERSION.SDK_INT >= 29) ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE else 0,
-        )
+        try {
+            ServiceCompat.startForeground(
+                this, NOTIFICATION_ID, buildNotification("Starting..."),
+                if (Build.VERSION.SDK_INT >= 29) ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE else 0,
+            )
+        } catch (e: Exception) {
+            foregroundFailed = true
+            stopSelf()
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (foregroundFailed) return START_NOT_STICKY
         HotspotController.init(this)
         if (intent?.action == ACTION_STOP) {
             scope.launch {
@@ -69,12 +77,19 @@ class HotspotService : Service() {
                 EngineState.RUNNING -> {
                     val n = s.clients.size
                     "${c.ssid} · ch ${c.channel} · $n device${if (n == 1) "" else "s"}" +
-                        if (s.upstream.isBlank()) " · no internet source" else " · via ${s.upstream}"
+                        (if (s.upstream.isBlank()) " · no internet source" else " · via ${s.upstream}") +
+                        (if (s.tailscale.isNotBlank()) " · Tailscale" else "")
                 }
                 EngineState.FAILED -> "Hotspot stopped unexpectedly - open the app"
                 else -> "Hotspot is off"
             }
             notify(text)
+            // The engine cleans up after itself when the radio is lost: then nothing is alive any more.
+            val nothingAlive = !s.daemonAlive && !s.dhcpAlive && !s.hostapdAlive
+            if (s.state == EngineState.FAILED && nothingAlive) {
+                notifyStopped(s.reason.ifBlank { "Hotspot stopped unexpectedly." })
+                stopSelf(); return
+            }
             // Stop the service once the engine has been off for a while (e.g. stopped from adb).
             stoppedCount = if (s.state == EngineState.STOPPED) stoppedCount + 1 else 0
             if (stoppedCount >= 3) { stopSelf(); return }
@@ -84,6 +99,23 @@ class HotspotService : Service() {
 
     private fun notify(text: String) {
         getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, buildNotification(text))
+    }
+
+    /** One-off (dismissable) notification explaining why the hotspot stopped. */
+    private fun notifyStopped(reason: String) {
+        val open = PendingIntent.getActivity(
+            this, 2, Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val n = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_hotspot)
+            .setContentTitle("Hotspot stopped")
+            .setContentText(reason)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(reason))
+            .setContentIntent(open)
+            .setAutoCancel(true)
+            .build()
+        getSystemService(NotificationManager::class.java).notify(STOPPED_NOTIFICATION_ID, n)
     }
 
     private fun buildNotification(text: String): Notification {
@@ -115,6 +147,7 @@ class HotspotService : Service() {
     companion object {
         const val CHANNEL_ID = "hotspot"
         const val NOTIFICATION_ID = 1
+        const val STOPPED_NOTIFICATION_ID = 2
         const val ACTION_STOP = "com.oshri.multihotspot.STOP"
 
         @Volatile

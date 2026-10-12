@@ -72,6 +72,8 @@ fun GroupEditScreen(groupId: String?, onDone: () -> Unit) {
     var lease by remember { mutableStateOf(original.leaseHours.toString()) }
     var internet by remember { mutableStateOf(original.internet) }
     var seeEachOther by remember { mutableStateOf(original.devicesSeeEachOther) }
+    var tailscale by remember { mutableStateOf(original.tailscale) }
+    val status by HotspotController.status.collectAsStateWithLifecycle()
     var dns1 by remember { mutableStateOf(original.dns1) }
     var dns2 by remember { mutableStateOf(original.dns2) }
     var leases by remember { mutableStateOf(config.staticLeases.filter { it.groupId == original.id }) }
@@ -96,7 +98,7 @@ fun GroupEditScreen(groupId: String?, onDone: () -> Unit) {
         name = name.trim(), password = password, gateway = gateway.trim(),
         prefix = prefix.toIntOrNull() ?: -1, dhcpStart = dhcpStart.trim(), dhcpEnd = dhcpEnd.trim(),
         leaseHours = lease.toIntOrNull() ?: -1, internet = internet, devicesSeeEachOther = seeEachOther,
-        dns1 = dns1.trim(), dns2 = dns2.trim(),
+        dns1 = dns1.trim(), dns2 = dns2.trim(), tailscale = tailscale,
     )
 
     fun save() {
@@ -104,9 +106,10 @@ fun GroupEditScreen(groupId: String?, onDone: () -> Unit) {
         val groupErrors = Validation.group(g)
         if (groupErrors.isNotEmpty()) { errors = groupErrors; return }
         val groups = if (isNew) config.groups + g else config.groups.map { if (it.id == g.id) g else it }
+        val oldLeases = config.staticLeases.filter { it.groupId == g.id }
         val candidate = config.copy(
             groups = groups,
-            staticLeases = config.staticLeases.filter { it.groupId != g.id } + leases,
+            staticLeases = if (leases == oldLeases) config.staticLeases else config.staticLeases.filter { it.groupId != g.id } + leases,
         )
         val all = Validation.config(candidate).filter { it.contains(g.name) || it.startsWith("Fixed IP") || it.startsWith("Device") }
         if (all.isNotEmpty()) { errors = all; return }
@@ -182,9 +185,30 @@ fun GroupEditScreen(groupId: String?, onDone: () -> Unit) {
                 seeEachOther,
             ) { seeEachOther = it }
             Text(
-                "Devices in different networks can never reach each other.",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                if (config.strictIsolation) "Devices in different networks can never reach each other."
+                else "Strict isolation is OFF in Settings: all devices on all passwords can reach each other directly, and this switch has no effect.",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (config.strictIsolation) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
             )
+            SwitchRow(
+                "Access to Tailscale network",
+                "Devices can reach your tailnet (100.x addresses and its subnet routes) through this phone, as if they were the phone. " +
+                    "Requires the Tailscale app on this phone to be signed in and connected.",
+                tailscale,
+            ) { tailscale = it }
+            if (tailscale) {
+                Text(
+                    when {
+                        status.tailscale.isNotBlank() -> "Tailscale is connected on this phone (${status.tailscale})."
+                        else -> "Tailscale isn't connected right now (or the hotspot is off). Open the Tailscale app, sign in and connect."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (dns1 != MAGIC_DNS) TextButton(onClick = { dns2 = if (dns1 != MAGIC_DNS) dns1 else dns2; dns1 = MAGIC_DNS }) {
+                    Text("Use Tailscale DNS (MagicDNS) so tailnet names resolve")
+                }
+            }
 
             SectionLabel("Fixed IPs in this network")
             if (leases.isEmpty()) Text("None. You can also add one from the device list on the main screen.",
@@ -267,6 +291,8 @@ fun GroupEditScreen(groupId: String?, onDone: () -> Unit) {
         )
     }
 }
+
+private const val MAGIC_DNS = "100.100.100.100"
 
 @Composable
 fun SectionLabel(text: String) {
