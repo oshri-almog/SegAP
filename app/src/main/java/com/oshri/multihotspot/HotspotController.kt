@@ -28,6 +28,7 @@ object HotspotController {
     private lateinit var appContext: Context
     private lateinit var store: ConfigStore
     private lateinit var appliedStore: ConfigStore
+    private lateinit var attemptedStore: ConfigStore
     private lateinit var engine: Engine
     private val opLock = Mutex()
 
@@ -59,6 +60,7 @@ object HotspotController {
         appContext = context.applicationContext
         store = ConfigStore(File(appContext.filesDir, "config.json"))
         appliedStore = ConfigStore(File(appContext.filesDir, "applied.json"))
+        attemptedStore = ConfigStore(File(appContext.filesDir, "attempted.json"))
         engine = Engine(appContext)
         _config.value = store.load()
     }
@@ -90,6 +92,13 @@ object HotspotController {
         _status.value = s
         if (s.state == EngineState.RUNNING) {
             if (_applied.value == null) _applied.value = appliedFile().takeIf { it.exists() }?.let { appliedStore.load() }
+            // The engine may run the last attempted config even though the app didn't see the start finish
+            // (e.g. it timed out): trust the engine's fingerprint of the files it actually uses.
+            val attempted = attemptedFile().takeIf { it.exists() }?.let { attemptedStore.load() }
+            if (attempted != null && attempted != _applied.value && s.configSum.isNotEmpty() && s.configSum == engine.writtenConfigSum()) {
+                _applied.value = attempted
+                appliedStore.save(attempted)
+            }
             ensureService()
         } else if (s.state == EngineState.STOPPED || s.state == EngineState.FAILED) {
             _applied.value = null
@@ -123,6 +132,7 @@ object HotspotController {
         // Start the foreground service now, while the user is still in the app: starting it from the
         // background after a slow engine start is not allowed on Android 12+.
         ensureService()
+        attemptedStore.save(c)
         val r = engine.start(c)
         if (!r.ok || !r.output.contains("OK")) {
             val detail = r.output.lines().filter { it.startsWith("ERROR") }.joinToString("\n").ifBlank { r.output.takeLast(400) }
@@ -156,6 +166,7 @@ object HotspotController {
     suspend fun radioLog(): String = engine.hostapdLog()
 
     private fun appliedFile() = File(appContext.filesDir, "applied.json")
+    private fun attemptedFile() = File(appContext.filesDir, "attempted.json")
 
     private fun ensureService() {
         if (HotspotService.running) return

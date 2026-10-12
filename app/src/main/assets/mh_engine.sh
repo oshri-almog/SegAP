@@ -38,7 +38,12 @@ cfg() { sed -n "s/^$1=//p" $ST/cfg/engine.conf 2>/dev/null | head -1; }
 is_mac() { echo "$1" | grep -qiE '^([0-9a-f]{2}:){5}[0-9a-f]{2}$'; }
 
 # pid exists AND its command line contains $2. Pid files survive reboots: never signal a recycled pid.
-pid_ok() { [ -n "$1" ] && [ -r "/proc/$1/cmdline" ] && tr '\0' ' ' < "/proc/$1/cmdline" | grep -q -- "$2"; }
+pid_ok() {
+  [ -n "$1" ] && [ -r "/proc/$1/cmdline" ] || return 1
+  # Never feed /proc/<pid>/cmdline straight into tr: if the process exits mid-read, toybox tr spins forever on the
+  # read error (this hung "Apply"). cat exits on errors, and the timeout bounds it anyway.
+  timeout 2 cat "/proc/$1/cmdline" 2>/dev/null | tr '\0' ' ' | grep -q -- "$2"
+}
 
 hostapd_pid() { pgrep -f "hostapd $HD/hostapd[.]conf" | head -1; }
 dnsmasq_pid() { d_p=$(cat $ST/dnsmasq.pid 2>/dev/null); pid_ok "$d_p" dnsmasq && echo "$d_p"; }
@@ -599,6 +604,8 @@ status() {
   echo "IFACE=$(cfg IFACE)"
   echo "UPSTREAM=$(cat $ST/upstream 2>/dev/null)"
   echo "TAILSCALE=$(cat $ST/tailscale 2>/dev/null)"
+  # Fingerprint of the config the engine runs (files in name order), so the app can tell which settings are live.
+  [ "$s_state" = running ] && echo "CFGSUM=$(cat $ST/cfg/* 2>/dev/null | md5sum | cut -d' ' -f1)"
   echo "HOSTAPD=$s_hp"
   echo "DHCP=$s_dp"
   echo "DAEMON=$s_da"

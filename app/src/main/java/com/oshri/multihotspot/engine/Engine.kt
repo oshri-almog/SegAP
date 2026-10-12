@@ -63,6 +63,15 @@ class Engine(private val context: Context) {
         return EngineStatus.parse(r.output)
     }
 
+    /** md5 of the config files last written for the engine, in name order (matches the engine's CFGSUM). */
+    fun writtenConfigSum(): String? {
+        val files = cfgDir.listFiles()?.filter { it.isFile }?.sortedBy { it.name } ?: return null
+        if (files.isEmpty()) return null
+        val md = java.security.MessageDigest.getInstance("MD5")
+        files.forEach { md.update(it.readBytes()) }
+        return md.digest().joinToString("") { "%02x".format(it.toInt() and 0xFF) }
+    }
+
     /** Last lines of hostapd's own log, for diagnosing start failures. */
     suspend fun hostapdLog(): String =
         RootShell.run("logcat -d -s hostapd:* | grep -i -E 'fail|error|invalid|not permitted|busy|AP-' | tail -n 12", 15_000).output

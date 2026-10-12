@@ -28,6 +28,16 @@ class EngineScriptTest {
         }
     }
 
+    @Test fun procFilesNeverReadDirectlyByTr() {
+        // toybox tr loops forever on a read error from a /proc file whose process just exited.
+        assertFalse(Regex("""tr [^|]*< *"?/proc/""").containsMatchIn(script))
+    }
+
+    @Test fun statusReportsConfigFingerprintOfFilesInNameOrder() {
+        // Engine.writtenConfigSum() hashes the cfg files sorted by name; the engine must hash the same bytes.
+        assertTrue(script.contains("""CFGSUM=${'$'}(cat ${'$'}ST/cfg/* 2>/dev/null | md5sum | cut -d' ' -f1)"""))
+    }
+
     @Test fun noCarriageReturns() {
         assertFalse(script.contains('\r'))
     }

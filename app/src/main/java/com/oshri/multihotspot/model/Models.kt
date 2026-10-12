@@ -148,6 +148,8 @@ data class EngineStatus(
     val upstream: String = "",
     /** Tailscale VPN interface the engine routes to (empty = not connected / not used). */
     val tailscale: String = "",
+    /** md5 of the config files the running engine uses (empty when not running). */
+    val configSum: String = "",
     val hostapdAlive: Boolean = false,
     val dhcpAlive: Boolean = false,
     val daemonAlive: Boolean = false,
@@ -195,6 +197,7 @@ data class EngineStatus(
                             "IFACE" -> s.copy(iface = v)
                             "UPSTREAM" -> s.copy(upstream = v)
                             "TAILSCALE" -> s.copy(tailscale = v)
+                            "CFGSUM" -> s.copy(configSum = v)
                             "HOSTAPD" -> s.copy(hostapdAlive = v == "1")
                             "DHCP" -> s.copy(dhcpAlive = v == "1")
                             "DAEMON" -> s.copy(daemonAlive = v == "1")
