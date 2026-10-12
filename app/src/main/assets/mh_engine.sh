@@ -147,7 +147,7 @@ fw_teardown() {
   while $IPT -D FORWARD -j mh_FWD 2>/dev/null; do :; done
   while $IPT -t nat -D POSTROUTING -j mh_NAT 2>/dev/null; do :; done
   while $IPT -t mangle -D FORWARD -j mh_MSS 2>/dev/null; do :; done
-  for c in mh_IN mh_FWD mh_SRC; do $IPT -F $c 2>/dev/null; $IPT -X $c 2>/dev/null; done
+  for c in mh_IN mh_FWD mh_SRC mh_XG; do $IPT -F $c 2>/dev/null; $IPT -X $c 2>/dev/null; done
   $IPT -t nat -F mh_NAT 2>/dev/null; $IPT -t nat -X mh_NAT 2>/dev/null
   $IPT -t mangle -F mh_MSS 2>/dev/null; $IPT -t mangle -X mh_MSS 2>/dev/null
 }
@@ -155,7 +155,7 @@ fw_teardown() {
 fw_setup() {
   IF=$1
   fw_teardown
-  $IPT -N mh_IN; $IPT -N mh_FWD; $IPT -N mh_SRC
+  $IPT -N mh_IN; $IPT -N mh_FWD; $IPT -N mh_SRC; $IPT -N mh_XG
   $IPT -t nat -N mh_NAT; $IPT -t mangle -N mh_MSS
 
   # Traffic to the phone itself: DHCP always, ping from valid clients, nothing else.
@@ -165,17 +165,23 @@ fw_setup() {
   $IPT -A mh_IN -i $IF -m state --state ESTABLISHED,RELATED -j ACCEPT
   $IPT -A mh_IN -i $IF -j DROP
 
-  # Forwarding: anti-spoof first, then replies, then per-group policy.
+  # Forwarding: anti-spoof first; device-to-device traffic is decided entirely in mh_XG; then replies from
+  # outside (upstream/Tailscale); then per-group policy.
   $IPT -A mh_FWD -i $IF -j mh_SRC
-  $IPT -A mh_FWD -o $IF -m state --state ESTABLISHED,RELATED -j ACCEPT
-  while read -r id gw pfx net mask inet iso ds de lt dns ts reach; do
+  $IPT -A mh_FWD -i $IF -o $IF -j mh_XG
+  $IPT -A mh_FWD ! -i $IF -o $IF -m state --state ESTABLISHED,RELATED -j ACCEPT
+  while read -r id gw pfx net mask inet iso ds de lt dns ts reach rest; do
     case "$id" in ''|\#*) continue ;; esac
-    [ "$iso" = 0 ] && $IPT -A mh_FWD -i $IF -o $IF -s $net -d $net -j ACCEPT
-    # Access to other groups: this group may open connections to them (replies pass via ESTABLISHED above).
+    [ "$iso" = 0 ] && $IPT -A mh_XG -s $net -d $net -j ACCEPT
+    # Access to other groups (one-way). Replies are allowed only for pairs allowed *now*, so removing access
+    # also cuts connections that were already open.
     for f_t in $(echo "${reach:--}" | tr ',' ' '); do
       [ "$f_t" = "-" ] && continue
       f_tnet=$(group_field "$f_t" 4)
-      [ -n "$f_tnet" ] && [ "$f_tnet" != "$net" ] && $IPT -A mh_FWD -i $IF -o $IF -s $net -d $f_tnet -j ACCEPT
+      if [ -n "$f_tnet" ] && [ "$f_tnet" != "$net" ]; then
+        $IPT -A mh_XG -s $net -d $f_tnet -j ACCEPT
+        $IPT -A mh_XG -s $f_tnet -d $net -m state --state ESTABLISHED,RELATED -j ACCEPT
+      fi
     done
     # Tailscale (tun*): only groups that have it enabled, regardless of their internet setting.
     if [ "$ts" = 1 ]; then
@@ -190,6 +196,7 @@ fw_setup() {
   done < $ST/cfg/groups.conf
   $IPT -A mh_FWD -i $IF -j DROP
   $IPT -A mh_FWD -o $IF -j DROP
+  $IPT -A mh_XG -j DROP
 
   # Unknown MAC or address outside its group's subnet: drop. Per-client RETURN rules are inserted on connect.
   $IPT -A mh_SRC -j DROP
@@ -268,11 +275,14 @@ gen_dnsmasq() {
     echo "dhcp-ignore=#known"
     echo "pid-file=$ST/dnsmasq.pid"
     echo "user=root"
-    while read -r id gw pfx net mask inet iso ds de lt dns; do
+    # Name every column: in sh the last variable takes the rest of the line, which would leak into "dns".
+    while read -r id gw pfx net mask inet iso ds de lt dns ts reach rest; do
       case "$id" in ''|\#*) continue ;; esac
       echo "dhcp-range=net:$id,$ds,$de,$mask,$lt"
       echo "dhcp-option=net:$id,3,$gw"
-      echo "dhcp-option=net:$id,6,$dns"
+      # Only well-formed IPv4 addresses: clients drop DHCP replies with a malformed DNS option.
+      d_dns=$(echo "$dns" | awk -F, '{ o = ""; for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) o = o (o == "" ? "" : ",") $i; print o }')
+      [ -n "$d_dns" ] && echo "dhcp-option=net:$id,6,$d_dns"
     done < $ST/cfg/groups.conf
   } > $ST/dnsmasq.conf
 }
@@ -527,7 +537,7 @@ start() {
   echo 1 > /proc/sys/net/ipv6/conf/$IF/disable_ipv6
 
   ip addr flush dev $IF
-  while read -r id gw pfx net mask inet iso ds de lt dns; do
+  while read -r id gw pfx net rest; do
     case "$id" in ''|\#*) continue ;; esac
     ip addr add $gw/$pfx dev $IF
     ip route replace $net dev $IF table local_network src $gw

@@ -21,8 +21,8 @@ fun formatRate(bytesPerSecond: Long): String {
     }
 }
 
-fun formatLinkRate(kbps: Long): String =
-    if (kbps >= 1000) String.format(Locale.US, if (kbps % 1000 == 0L) "%.0f" else "%.1f", kbps / 1000.0) else "<1"
+/** PHY link rate, whole Mb/s (decimals are noise here and make the line wrap). */
+fun formatLinkRate(kbps: Long): String = if (kbps >= 1000) ((kbps + 500) / 1000).toString() else "<1"
 
 fun formatSince(epochSeconds: Long, nowMillis: Long = System.currentTimeMillis()): String {
     if (epochSeconds <= 0) return ""

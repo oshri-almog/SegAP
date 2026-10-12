@@ -10,6 +10,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.State
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -60,16 +61,18 @@ fun SignalIcon(rssi: Int?, active: Boolean, modifier: Modifier = Modifier.size(2
             label = "bar$i",
         )
     }
-    // Only run the infinite animation while traffic flows (saves battery when idle).
-    val sweep = if (active) {
+    // Only run the infinite animation while traffic flows and some bar is lit (saves battery when idle).
+    // The State is read inside the draw block, so each frame only redraws instead of recomposing the row.
+    val sweep: State<Float>? = if (active && level > 0) {
         rememberInfiniteTransition(label = "activity").animateFloat(
             initialValue = 0f, targetValue = 5f,
             animationSpec = infiniteRepeatable(tween(1100, easing = LinearEasing)),
             label = "sweep",
-        ).value
-    } else -10f
+        )
+    } else null
 
     Canvas(modifier.semantics { contentDescription = "Signal ${signalLabel(level)}" + (rssi?.let { ", $it dBm" } ?: "") }) {
+        val sw = sweep?.value ?: -10f
         val gap = size.width * 0.09f
         val barW = (size.width - gap * 3) / 4
         val radius = CornerRadius(barW / 3, barW / 3)
@@ -79,8 +82,8 @@ fun SignalIcon(rssi: Int?, active: Boolean, modifier: Modifier = Modifier.size(2
             drawRoundRect(track, Offset(left, size.height - h), Size(barW, h), radius)
             val f = fills[i].value
             if (f > 0f) {
-                val glow = (1f - abs(sweep - (i + 1)).coerceIn(0f, 1f))
-                val c = if (active) color.copy(alpha = 0.6f + 0.4f * glow) else color
+                val glow = (1f - abs(sw - (i + 1)).coerceIn(0f, 1f))
+                val c = if (sweep != null) color.copy(alpha = 0.6f + 0.4f * glow) else color
                 val fh = h * f
                 drawRoundRect(c, Offset(left, size.height - fh), Size(barW, fh), radius)
             }

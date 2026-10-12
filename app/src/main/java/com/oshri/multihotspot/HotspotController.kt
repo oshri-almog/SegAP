@@ -81,31 +81,12 @@ object HotspotController {
 
     suspend fun checkRoot(): Boolean = RootShell.isAvailable().also { _root.value = it }
 
-    /** Previous byte counters per device, to turn totals into current rates. */
-    private data class Sample(val atMs: Long, val up: Long, val down: Long)
-    private val samples = HashMap<String, Sample>()
-
-    private fun withRates(s: EngineStatus): EngineStatus {
-        val now = android.os.SystemClock.elapsedRealtime()
-        val clients = s.clients.map { c ->
-            val prev = samples[c.mac]
-            val down = c.downloadBytes ?: 0
-            samples[c.mac] = Sample(now, c.uploadBytes, down)
-            val dt = now - (prev?.atMs ?: now)
-            if (prev == null || dt !in 500..30_000) c
-            else c.copy(
-                // Counters restart when a device reconnects: never show a negative rate.
-                uploadRate = ((c.uploadBytes - prev.up).coerceAtLeast(0) * 1000 / dt),
-                downloadRate = ((down - prev.down).coerceAtLeast(0) * 1000 / dt),
-            )
-        }
-        samples.keys.retainAll(s.clients.map { it.mac }.toSet())
-        return s.copy(clients = clients)
-    }
+    private val rates = com.oshri.multihotspot.model.RateTracker({ android.os.SystemClock.elapsedRealtime() })
 
     suspend fun refresh() {
         if (_root.value != true && !checkRoot()) return
-        val s = withRates(engine.status())
+        val raw = engine.status()
+        val s = raw.copy(clients = rates.apply(raw.clients))
         _status.value = s
         if (s.state == EngineState.RUNNING) {
             if (_applied.value == null) _applied.value = appliedFile().takeIf { it.exists() }?.let { appliedStore.load() }

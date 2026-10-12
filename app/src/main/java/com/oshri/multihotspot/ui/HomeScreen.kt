@@ -70,6 +70,7 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.oshri.multihotspot.HotspotController
@@ -417,12 +418,13 @@ private fun ClientRow(
                 }
                 // Current traffic, from the device's point of view.
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.padding(top = 2.dp)) {
-                    RateText(Icons.Default.ArrowDownward, "Download", client.downloadRate)
+                    // No driver stats -> no download counter: show "–", not a misleading 0.
+                    RateText(Icons.Default.ArrowDownward, "Download", client.downloadRate.takeIf { client.downloadBytes != null })
                     RateText(Icons.Default.ArrowUpward, "Upload", client.uploadRate)
                 }
                 Text(
                     listOf(
-                        "Used ${formatBytes(client.totalBytes)}",
+                        if (client.downloadBytes != null) "Used ${formatBytes(client.totalBytes)}" else "Sent ${formatBytes(client.uploadBytes)}",
                         formatSince(client.connectedSinceEpoch),
                     ).filter { it.isNotBlank() }.joinToString(" · "),
                     style = MaterialTheme.typography.bodySmall,
@@ -435,6 +437,8 @@ private fun ClientRow(
                     ).joinToString(" · "),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
             Box {
@@ -457,12 +461,12 @@ private fun ClientRow(
 }
 
 @Composable
-private fun RateText(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, bytesPerSecond: Long) {
+private fun RateText(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, bytesPerSecond: Long?) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Icon(icon, contentDescription = label, modifier = Modifier.size(14.dp),
-            tint = if (bytesPerSecond > 1024) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+            tint = if ((bytesPerSecond ?: 0) > 1024) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
         Text(
-            formatRate(bytesPerSecond),
+            bytesPerSecond?.let { formatRate(it) } ?: "–",
             style = MaterialTheme.typography.bodyMedium,
             fontFamily = FontFamily.Monospace,
             modifier = Modifier.padding(start = 2.dp),
