@@ -609,14 +609,16 @@ status() {
   echo "HOSTAPD=$s_hp"
   echo "DHCP=$s_dp"
   echo "DAEMON=$s_da"
+  # Per-call temp files: a manual "status" may run while the app polls.
+  s_bt=$ST/bytes.$$; s_st=$ST/sta.$$
   # Bytes sent by each client (counter of its anti-spoof rule).
   # iptables prints the match as "MACaa:bb:..." (some builds: "MAC aa:bb:...").
-  $IPT -L mh_SRC -v -x -n 2>/dev/null | awk '$3=="RETURN" {for(i=1;i<=NF;i++) if($i ~ /^MAC/) {m=substr($i,4); if(m=="") m=$(i+1); print tolower(m), $2}}' > $ST/bytes.tmp
+  $IPT -L mh_SRC -v -x -n 2>/dev/null | awk '$3=="RETURN" {for(i=1;i<=NF;i++) if($i ~ /^MAC/) {m=substr($i,4); if(m=="") m=$(i+1); print tolower(m), $2}}' > $s_bt
   # Radio stats (RSSI, byte counters, link rates) from the driver via the native helper, if present.
   s_wl=${1:-$(cfg WL_HELPER)}   # the app passes the current path (it moves when the app is updated)
-  : > $ST/sta.tmp
+  : > $s_st
   if [ -n "$s_wl" ] && [ -x "$s_wl" ] && [ -s $ST/connected ]; then
-    "$s_wl" "$(cfg IFACE)" $(awk '{print $1}' $ST/connected) > $ST/sta.tmp 2>/dev/null
+    "$s_wl" "$(cfg IFACE)" $(awk '{print $1}' $ST/connected) > $s_st 2>/dev/null
   fi
   while read -r c_mac c_grp c_since; do
     [ -z "$c_mac" ] && continue
@@ -629,18 +631,18 @@ status() {
       c_ip=$l_ip; c_host=$l_host; break
     done < $ST/dnsmasq.leases 2>/dev/null
     # STA <mac> <rssi> <tx_bytes=device download> <rx_bytes=device upload> <tx_kbps> <rx_kbps> <idle>
-    c_sta=$(grep "^STA $c_mac " $ST/sta.tmp 2>/dev/null | head -1)
+    c_sta=$(grep "^STA $c_mac " $s_st 2>/dev/null | head -1)
     if [ -n "$c_sta" ]; then
       set -- $c_sta
       c_rssi=$3; c_down=$4; c_up=$5; c_txr=$6; c_rxr=$7
     else
       c_rssi=-; c_down=-; c_txr=-; c_rxr=-
-      c_up=$(awk -v m="$c_mac" '$1==m {print $2; exit}' $ST/bytes.tmp)
+      c_up=$(awk -v m="$c_mac" '$1==m {print $2; exit}' $s_bt)
     fi
     # CLIENT <mac> <group> <ip> <host> <since> <up_bytes> <down_bytes> <rssi_dbm> <tx_kbps> <rx_kbps>
     echo "CLIENT $c_mac $c_grp ${c_ip:--} ${c_host:--} $c_since ${c_up:-0} $c_down $c_rssi $c_txr $c_rxr"
   done < $ST/connected
-  rm -f $ST/bytes.tmp $ST/sta.tmp
+  rm -f $s_bt $s_st
   echo "LOG_BEGIN"
   tail -n 15 $ST/engine.log 2>/dev/null
   echo "LOG_END"
