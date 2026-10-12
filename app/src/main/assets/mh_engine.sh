@@ -46,6 +46,13 @@ daemon_alive() { pid_ok "$(cat $ST/daemon.pid 2>/dev/null)" "mh_engine"; }
 # Android's own hostapd service (Samsung Mobile Hotspot, Quick Share, Smart View...) shares the radio with us.
 system_hotspot_running() { [ "$(getprop init.svc.hostapd)" = running ]; }
 
+# ...or Android tried to start it recently: its attempt alone tears our AP down, even if it then fails itself.
+system_hotspot_recent() {
+  system_hotspot_running && return 0
+  r_since=$(date -d @$(( $(date +%s) - 40 )) '+%m-%d %H:%M:%S.000' 2>/dev/null) || return 1
+  logcat -d -T "$r_since" -s WifiService:I 2>/dev/null | grep -q -E 'startTetheredHotspot|startSoftAp|startLocalOnlyHotspot'
+}
+
 # settings wifi_on: 1 = on, 2 = on in airplane mode.
 wifi_is_on() { case "$(settings get global wifi_on 2>/dev/null)" in 1|2) return 0 ;; esac; return 1; }
 
@@ -387,7 +394,7 @@ watchdog() {
     sleep 5
     [ "$(cat $ST/state 2>/dev/null)" = running ] || continue
     if [ -z "$(hostapd_pid)" ]; then
-      if system_hotspot_running; then
+      if system_hotspot_recent; then
         w_reason="The phone's built-in hotspot (or a Samsung feature using it, e.g. Quick Share / Smart View) took over the Wi-Fi radio. Turn it off, then start again."
       else
         w_reason="The access point stopped unexpectedly (driver or radio reset). Start again; see Log for details."

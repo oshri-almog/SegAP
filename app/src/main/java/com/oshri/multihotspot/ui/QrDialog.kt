@@ -25,6 +25,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
+import com.google.zxing.common.BitMatrix
 import com.google.zxing.qrcode.QRCodeWriter
 import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel
 
@@ -34,13 +35,17 @@ fun wifiQrPayload(ssid: String, password: String, hidden: Boolean): String {
     return "WIFI:T:WPA;S:${esc(ssid)};P:${esc(password)};" + (if (hidden) "H:true;" else "") + ";"
 }
 
-fun qrBitmap(content: String, sizePx: Int = 720): Bitmap {
+fun qrMatrix(content: String, sizePx: Int = 720): BitMatrix {
     val hints = mapOf(
         EncodeHintType.MARGIN to 1,
         EncodeHintType.CHARACTER_SET to "UTF-8",
         EncodeHintType.ERROR_CORRECTION to ErrorCorrectionLevel.M,
     )
-    val m = QRCodeWriter().encode(content, BarcodeFormat.QR_CODE, sizePx, sizePx, hints)
+    return QRCodeWriter().encode(content, BarcodeFormat.QR_CODE, sizePx, sizePx, hints)
+}
+
+fun qrBitmap(content: String, sizePx: Int = 720): Bitmap {
+    val m = qrMatrix(content, sizePx)
     val pixels = IntArray(m.width * m.height) { i ->
         if (m.get(i % m.width, i / m.width)) 0xFF000000.toInt() else 0xFFFFFFFF.toInt()
     }
