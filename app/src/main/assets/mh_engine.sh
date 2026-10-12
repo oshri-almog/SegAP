@@ -27,6 +27,7 @@ HOSTAPD=/vendor/bin/hw/hostapd
 DNSMASQ=/system/bin/dnsmasq
 PREF=21500     # ip rule: forwarded traffic from the AP -> upstream table
 TS_PREF=21400  # ip rule: groups with Tailscale access -> Tailscale VPN table (checked first)
+LOCAL_PREF=10500  # ip rule: the phone's own traffic to hotspot subnets -> local_network (see start())
 IPT="iptables -w"
 
 log() { echo "$(date '+%m-%d %H:%M:%S') $*" >> $ST/engine.log; }
@@ -347,6 +348,7 @@ net_teardown() {
   fw_teardown
   while ip rule del pref $PREF 2>/dev/null; do :; done
   while ip rule del pref $TS_PREF 2>/dev/null; do :; done
+  while ip rule del pref $LOCAL_PREF 2>/dev/null; do :; done
   : > $ST/tailscale 2>/dev/null
 
   if [ -n "$t_if" ] && [ -f $ST/cfg/groups.conf ]; then
@@ -522,7 +524,11 @@ start() {
   while read -r id gw pfx net mask inet iso ds de lt dns; do
     case "$id" in ''|\#*) continue ;; esac
     ip addr add $gw/$pfx dev $IF
-    ip route replace $net dev $IF table local_network
+    ip route replace $net dev $IF table local_network src $gw
+    # Sockets of apps bound to a network (e.g. Tailscale's, pinned to Wi-Fi/mobile) would otherwise send
+    # traffic for hotspot clients out to the upstream router. This lets Tailscale on the phone talk to
+    # Tailscale on hotspot clients directly instead of through a DERP relay (~150 ms -> a few ms).
+    ip rule add pref $LOCAL_PREF to $net lookup local_network
   done < $ST/cfg/groups.conf
   ip link set $IF up
   # Proxy ARP makes the phone answer for every address on the interface so same-group devices can be

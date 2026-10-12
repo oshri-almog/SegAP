@@ -32,6 +32,9 @@ object ConfigWriter {
         appendLine("channel=${c.channel}")
         appendLine("ieee80211n=1")
         appendLine("wmm_enabled=1")
+        // Sleeping clients wake for buffered traffic every DTIM beacon: 1 = every 100 ms (driver default 2 = 200 ms).
+        appendLine("beacon_int=100")
+        appendLine("dtim_period=1")
         appendLine("max_num_sta=${c.maxClients}")
         appendLine("ap_isolate=${if (c.strictIsolation) 1 else 0}")
         appendLine("ignore_broadcast_ssid=${if (c.hidden) 1 else 0}")
