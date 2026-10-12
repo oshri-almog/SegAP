@@ -37,6 +37,11 @@ android {
         compose = true
     }
 
+    packaging {
+        // Keep native helpers as real files on disk so root can execute them.
+        jniLibs.useLegacyPackaging = true
+    }
+
     testOptions {
         unitTests.isReturnDefaultValues = true
     }

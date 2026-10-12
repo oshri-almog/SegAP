@@ -11,12 +11,13 @@ object ConfigWriter {
     /** Where the engine copies hostapd's files (must be readable by the hostapd SELinux domain). */
     const val HOSTAPD_DIR = "/data/vendor/wifi/hostapd/mh"
 
-    fun engineConf(c: HotspotConfig): String = buildString {
+    fun engineConf(c: HotspotConfig, wlHelper: String = ""): String = buildString {
         appendLine("IFACE=${c.iface}")
         appendLine("MAC=${Mac.normalize(c.bssid) ?: ""}")
         appendLine("WIFI_MODE=${if (c.wifiMode == WifiMode.OFF) "off" else "keep"}")
         appendLine("UPSTREAM=auto")
         appendLine("DEFAULT_GROUP=${defaultGroupId(c)}")
+        if (wlHelper.isNotBlank()) appendLine("WL_HELPER=$wlHelper")
     }
 
     /** Devices without a keyid (should not happen with wpa_psk_file) go to the most restricted group. */
@@ -63,6 +64,7 @@ object ConfigWriter {
                     if (g.internet) 1 else 0, if (g.devicesSeeEachOther) 0 else 1,
                     g.dhcpStart, g.dhcpEnd, "${g.leaseHours}h", dns,
                     if (g.tailscale) 1 else 0,
+                    g.canReach.filter { id -> id != g.id && c.groups.any { it.id == id } }.joinToString(",").ifEmpty { "-" },
                 ).joinToString(" ")
             )
         }
@@ -77,10 +79,10 @@ object ConfigWriter {
     }
 
     /** Writes all engine files into [dir] (replacing its previous content). */
-    fun writeAll(c: HotspotConfig, countryCode: String, dir: File) {
+    fun writeAll(c: HotspotConfig, countryCode: String, dir: File, wlHelper: String = "") {
         dir.deleteRecursively()
         dir.mkdirs()
-        File(dir, "engine.conf").writeText(engineConf(c))
+        File(dir, "engine.conf").writeText(engineConf(c, wlHelper))
         File(dir, "hostapd.conf").writeText(hostapdConf(c, countryCode))
         File(dir, "psk.txt").writeText(pskFile(c))
         File(dir, "groups.conf").writeText(groupsConf(c))

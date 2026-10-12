@@ -47,6 +47,7 @@ class ConfigStore(private val file: File) {
                         put("devicesSeeEachOther", g.devicesSeeEachOther)
                         put("dns1", g.dns1); put("dns2", g.dns2)
                         put("tailscale", g.tailscale)
+                        put("canReach", JSONArray(g.canReach))
                     })
                 }
             })
@@ -71,6 +72,7 @@ class ConfigStore(private val file: File) {
                         devicesSeeEachOther = g.optBoolean("devicesSeeEachOther", true),
                         dns1 = g.optString("dns1", "1.1.1.1"), dns2 = g.optString("dns2", ""),
                         tailscale = g.optBoolean("tailscale", false),
+                        canReach = g.optJSONArray("canReach")?.let { r -> (0 until r.length()).map { r.getString(it) } } ?: emptyList(),
                     )
                 }
             } ?: def.groups

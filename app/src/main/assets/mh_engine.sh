@@ -7,14 +7,14 @@
 # usage:
 #   mh_engine.sh start <cfgdir>   start (or restart) with config files from <cfgdir>
 #   mh_engine.sh stop             stop and undo every change
-#   mh_engine.sh status           print state and connected clients
+#   mh_engine.sh status [helper]  print state and connected clients (helper = path of the native stats tool)
 #   mh_engine.sh daemon           (internal) event loop + watchdog
 #
 # <cfgdir> must contain:
-#   engine.conf  KEY=VALUE lines: IFACE, MAC, WIFI_MODE (keep|off), UPSTREAM (auto|<iface>), DEFAULT_GROUP
+#   engine.conf  KEY=VALUE lines: IFACE, MAC, WIFI_MODE (keep|off), UPSTREAM (auto|<iface>), DEFAULT_GROUP, WL_HELPER
 #   hostapd.conf complete hostapd config (wpa_psk_file must point to $HD/psk.txt)
 #   psk.txt      hostapd wpa_psk_file, one "keyid=<group> 00:00:00:00:00:00 <passphrase>" per group
-#   groups.conf  ID GW PREFIX NETCIDR NETMASK INTERNET(0|1) ISOLATE(0|1) DHCP_START DHCP_END LEASE DNS(csv) TAILSCALE(0|1)
+#   groups.conf  ID GW PREFIX NETCIDR NETMASK INTERNET(0|1) ISOLATE(0|1) DHCP_START DHCP_END LEASE DNS(csv) TAILSCALE(0|1) REACH(csv ids|-)
 #   static.conf  MAC GROUP IP   (optional fixed addresses)
 #   deny.txt     blocked MACs   (optional)
 #
@@ -168,9 +168,15 @@ fw_setup() {
   # Forwarding: anti-spoof first, then replies, then per-group policy.
   $IPT -A mh_FWD -i $IF -j mh_SRC
   $IPT -A mh_FWD -o $IF -m state --state ESTABLISHED,RELATED -j ACCEPT
-  while read -r id gw pfx net mask inet iso ds de lt dns ts; do
+  while read -r id gw pfx net mask inet iso ds de lt dns ts reach; do
     case "$id" in ''|\#*) continue ;; esac
     [ "$iso" = 0 ] && $IPT -A mh_FWD -i $IF -o $IF -s $net -d $net -j ACCEPT
+    # Access to other groups: this group may open connections to them (replies pass via ESTABLISHED above).
+    for f_t in $(echo "${reach:--}" | tr ',' ' '); do
+      [ "$f_t" = "-" ] && continue
+      f_tnet=$(group_field "$f_t" 4)
+      [ -n "$f_tnet" ] && [ "$f_tnet" != "$net" ] && $IPT -A mh_FWD -i $IF -o $IF -s $net -d $f_tnet -j ACCEPT
+    done
     # Tailscale (tun*): only groups that have it enabled, regardless of their internet setting.
     if [ "$ts" = 1 ]; then
       $IPT -A mh_FWD -i $IF -o tun+ -s $net -j ACCEPT
@@ -589,6 +595,12 @@ status() {
   # Bytes sent by each client (counter of its anti-spoof rule).
   # iptables prints the match as "MACaa:bb:..." (some builds: "MAC aa:bb:...").
   $IPT -L mh_SRC -v -x -n 2>/dev/null | awk '$3=="RETURN" {for(i=1;i<=NF;i++) if($i ~ /^MAC/) {m=substr($i,4); if(m=="") m=$(i+1); print tolower(m), $2}}' > $ST/bytes.tmp
+  # Radio stats (RSSI, byte counters, link rates) from the driver via the native helper, if present.
+  s_wl=${1:-$(cfg WL_HELPER)}   # the app passes the current path (it moves when the app is updated)
+  : > $ST/sta.tmp
+  if [ -n "$s_wl" ] && [ -x "$s_wl" ] && [ -s $ST/connected ]; then
+    "$s_wl" "$(cfg IFACE)" $(awk '{print $1}' $ST/connected) > $ST/sta.tmp 2>/dev/null
+  fi
   while read -r c_mac c_grp c_since; do
     [ -z "$c_mac" ] && continue
     c_net=$(group_field "$c_grp" 4)
@@ -599,10 +611,19 @@ status() {
       in_cidr "$l_ip" "$c_net" || continue
       c_ip=$l_ip; c_host=$l_host; break
     done < $ST/dnsmasq.leases 2>/dev/null
-    c_up=$(awk -v m="$c_mac" '$1==m {print $2; exit}' $ST/bytes.tmp)
-    echo "CLIENT $c_mac $c_grp ${c_ip:--} ${c_host:--} $c_since ${c_up:-0}"
+    # STA <mac> <rssi> <tx_bytes=device download> <rx_bytes=device upload> <tx_kbps> <rx_kbps> <idle>
+    c_sta=$(grep "^STA $c_mac " $ST/sta.tmp 2>/dev/null | head -1)
+    if [ -n "$c_sta" ]; then
+      set -- $c_sta
+      c_rssi=$3; c_down=$4; c_up=$5; c_txr=$6; c_rxr=$7
+    else
+      c_rssi=-; c_down=-; c_txr=-; c_rxr=-
+      c_up=$(awk -v m="$c_mac" '$1==m {print $2; exit}' $ST/bytes.tmp)
+    fi
+    # CLIENT <mac> <group> <ip> <host> <since> <up_bytes> <down_bytes> <rssi_dbm> <tx_kbps> <rx_kbps>
+    echo "CLIENT $c_mac $c_grp ${c_ip:--} ${c_host:--} $c_since ${c_up:-0} $c_down $c_rssi $c_txr $c_rxr"
   done < $ST/connected
-  rm -f $ST/bytes.tmp
+  rm -f $ST/bytes.tmp $ST/sta.tmp
   echo "LOG_BEGIN"
   tail -n 15 $ST/engine.log 2>/dev/null
   echo "LOG_END"
@@ -611,7 +632,7 @@ status() {
 case "$1" in
   start)  start "$2" ;;
   stop)   stop ;;
-  status) status ;;
+  status) status "$2" ;;
   daemon) daemon ;;
   *) echo "usage: $0 start <cfgdir>|stop|status"; exit 2 ;;
 esac

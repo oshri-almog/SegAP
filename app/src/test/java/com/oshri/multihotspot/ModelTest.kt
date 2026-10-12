@@ -112,12 +112,15 @@ class ModelTest {
         assertTrue(hostapd.contains("deny_mac_file="))
 
         val groups = ConfigWriter.groupsConf(c).trim().lines()
-        assertEquals("g1 192.168.10.1 24 192.168.10.0/24 255.255.255.0 1 0 192.168.10.100 192.168.10.200 12h 1.1.1.1,8.8.8.8 0", groups[0])
-        assertEquals("g2 192.168.20.1 24 192.168.20.0/24 255.255.255.0 0 1 192.168.20.100 192.168.20.200 12h 1.1.1.1,8.8.8.8 0", groups[1])
+        assertEquals("g1 192.168.10.1 24 192.168.10.0/24 255.255.255.0 1 0 192.168.10.100 192.168.10.200 12h 1.1.1.1,8.8.8.8 0 -", groups[0])
+        assertEquals("g2 192.168.20.1 24 192.168.20.0/24 255.255.255.0 0 1 192.168.20.100 192.168.20.200 12h 1.1.1.1,8.8.8.8 0 -", groups[1])
         val ts = c.copy(groups = c.groups.map { if (it.id == "g2") it.copy(tailscale = true) else it })
-        assertTrue(ConfigWriter.groupsConf(ts).trim().lines()[1].endsWith(" 1"))
-        // engine reads 12 whitespace-separated columns: no field may contain spaces
-        ConfigWriter.groupsConf(ts).trim().lines().forEach { assertEquals(12, it.split(" ").size) }
+        assertTrue(ConfigWriter.groupsConf(ts).trim().lines()[1].endsWith(" 1 -"))
+        // engine reads 13 whitespace-separated columns: no field may contain spaces
+        ConfigWriter.groupsConf(ts).trim().lines().forEach { assertEquals(13, it.split(" ").size) }
+        // access to other networks: known ids only, never itself
+        val reach = c.copy(groups = c.groups.map { if (it.id == "g1") it.copy(canReach = listOf("g2", "g1", "gone")) else it })
+        assertTrue(ConfigWriter.groupsConf(reach).trim().lines()[0].endsWith(" 0 g2"))
         assertEquals("keyid=g1 00:00:00:00:00:00 password-g1", ConfigWriter.pskFile(c).lines()[0])
         assertEquals("aa:bb:cc:dd:ee:ff\n", ConfigWriter.denyFile(c))
         assertEquals("g2", ConfigWriter.defaultGroupId(c)) // most restricted
@@ -174,10 +177,39 @@ class ModelTest {
         assertEquals("tun0", s.tailscale)
     }
 
+    @Test fun statusParsesRadioStats() {
+        val s = EngineStatus.parse(
+            listOf(
+                "STATE=running",
+                "CLIENT 02:00:00:00:00:01 g2 192.168.20.169 S24 1791823287 775841 600198 -21 192500 6000",
+                "CLIENT 02:00:00:00:00:02 g1 - - 1791823133 1200 - - - -",
+            ).joinToString("\n")
+        )
+        val a = s.clients[0]
+        assertEquals(775841L, a.uploadBytes)
+        assertEquals(600198L, a.downloadBytes)
+        assertEquals(-21, a.rssi)
+        assertEquals(192500L, a.linkDownKbps)
+        assertEquals(6000L, a.linkUpKbps)
+        assertEquals(775841L + 600198L, a.totalBytes)
+        val b = s.clients[1]
+        assertNull(b.downloadBytes)
+        assertNull(b.rssi)
+        assertEquals(1200L, b.totalBytes)
+    }
+
+    @Test fun validationRejectsUnknownReach() {
+        val c = HotspotConfig.default()
+        val bad = c.copy(groups = c.groups.map { if (it.id == "g1") it.copy(canReach = listOf("g9")) else it })
+        assertTrue(Validation.config(bad).any { it.contains("no longer exists") })
+        val ok = c.copy(groups = c.groups.map { if (it.id == "g1") it.copy(canReach = listOf("g2")) else it })
+        assertEquals(emptyList<String>(), Validation.config(ok))
+    }
+
     @Test fun configStoreRoundTrip() {
         val c = HotspotConfig.default().copy(
             ssid = "Round ✓", channel = 11, hidden = true, wifiMode = WifiMode.OFF, strictIsolation = false,
-            groups = HotspotConfig.default().groups.map { it.copy(tailscale = it.id == "g1") },
+            groups = HotspotConfig.default().groups.map { it.copy(tailscale = it.id == "g1", canReach = if (it.id == "g1") listOf("g2") else emptyList()) },
             staticLeases = listOf(StaticLease("aa:bb:cc:dd:ee:ff", "g1", "192.168.10.50", "TV")),
             blockedMacs = listOf("11:22:33:44:55:66"),
         )

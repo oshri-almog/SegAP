@@ -2,6 +2,8 @@ package com.oshri.multihotspot.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -23,6 +25,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -55,7 +58,7 @@ import com.oshri.multihotspot.model.StaticLease
 import com.oshri.multihotspot.model.Validation
 import com.oshri.multihotspot.model.suggestNewGroup
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun GroupEditScreen(groupId: String?, onDone: () -> Unit) {
     val config by HotspotController.config.collectAsStateWithLifecycle()
@@ -73,6 +76,7 @@ fun GroupEditScreen(groupId: String?, onDone: () -> Unit) {
     var internet by remember { mutableStateOf(original.internet) }
     var seeEachOther by remember { mutableStateOf(original.devicesSeeEachOther) }
     var tailscale by remember { mutableStateOf(original.tailscale) }
+    var reach by remember { mutableStateOf(original.canReach.toSet()) }
     val status by HotspotController.status.collectAsStateWithLifecycle()
     var dns1 by remember { mutableStateOf(original.dns1) }
     var dns2 by remember { mutableStateOf(original.dns2) }
@@ -99,6 +103,8 @@ fun GroupEditScreen(groupId: String?, onDone: () -> Unit) {
         prefix = prefix.toIntOrNull() ?: -1, dhcpStart = dhcpStart.trim(), dhcpEnd = dhcpEnd.trim(),
         leaseHours = lease.toIntOrNull() ?: -1, internet = internet, devicesSeeEachOther = seeEachOther,
         dns1 = dns1.trim(), dns2 = dns2.trim(), tailscale = tailscale,
+        // Keep the user's order of networks, drop ones that were deleted meanwhile.
+        canReach = config.groups.map { it.id }.filter { it in reach && it != original.id },
     )
 
     fun save() {
@@ -210,6 +216,34 @@ fun GroupEditScreen(groupId: String?, onDone: () -> Unit) {
                 }
             }
 
+            SectionLabel("Access to other networks")
+            val others = config.groups.filter { it.id != original.id }
+            if (others.isEmpty()) {
+                Text("Add another network to allow access between them.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else {
+                Text(
+                    "Devices in this network can open connections to devices in the selected networks " +
+                        "(e.g. Home -> IoT to control smart devices). One-way: those devices can only answer, " +
+                        "not start connections back, unless you allow it in their settings too.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    others.forEach { o ->
+                        FilterChip(
+                            selected = o.id in reach,
+                            onClick = { reach = if (o.id in reach) reach - o.id else reach + o.id },
+                            label = { Text("${o.name} · ${o.networkCidr}") },
+                        )
+                    }
+                }
+                val back = others.filter { original.id in it.canReach }.map { it.name }
+                if (back.isNotEmpty()) Text(
+                    "Can be reached from: ${back.joinToString(", ")}",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
             SectionLabel("Fixed IPs in this network")
             if (leases.isEmpty()) Text("None. You can also add one from the device list on the main screen.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -243,7 +277,8 @@ fun GroupEditScreen(groupId: String?, onDone: () -> Unit) {
             TextButton(onClick = {
                 HotspotController.updateConfig(
                     config.copy(
-                        groups = config.groups.filter { it.id != original.id },
+                        groups = config.groups.filter { it.id != original.id }
+                            .map { it.copy(canReach = it.canReach - original.id) },
                         staticLeases = config.staticLeases.filter { it.groupId != original.id },
                     )
                 )

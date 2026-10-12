@@ -26,10 +26,14 @@ class Engine(private val context: Context) {
         return Regex("\\b([A-Z]{2})\\b").find(r.output.substringAfterLast("="))?.groupValues?.get(1)
     }
 
+    /** Native helper for per-device radio stats, extracted from the APK (jniLibs) by the installer. */
+    private fun wlHelper(): String =
+        File(context.applicationInfo.nativeLibraryDir, "libmhwl.so").takeIf { it.exists() }?.absolutePath ?: ""
+
     suspend fun start(config: HotspotConfig): RootShell.Result {
         installScript()
         val cc = countryCode() ?: "IL"
-        ConfigWriter.writeAll(config, cc, cfgDir)
+        ConfigWriter.writeAll(config, cc, cfgDir, wlHelper())
         return RootShell.run("sh ${quote(script.absolutePath)} start ${quote(cfgDir.absolutePath)}", 120_000)
     }
 
@@ -40,7 +44,8 @@ class Engine(private val context: Context) {
 
     suspend fun status(): EngineStatus {
         if (!script.exists()) installScript()
-        val r = RootShell.run("sh ${quote(script.absolutePath)} status", 20_000)
+        val wl = wlHelper()
+        val r = RootShell.run("sh ${quote(script.absolutePath)} status" + (if (wl.isNotEmpty()) " ${quote(wl)}" else ""), 20_000)
         if (r.exitCode < 0) return EngineStatus(state = EngineState.UNKNOWN, log = listOf(r.output))
         return EngineStatus.parse(r.output)
     }

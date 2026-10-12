@@ -11,6 +11,19 @@ fun formatBytes(bytes: Long): String {
     return String.format(Locale.US, if (v < 10) "%.1f %s" else "%.0f %s", v, units[i])
 }
 
+/** Throughput in bits per second, network style (kb/s, Mb/s). */
+fun formatRate(bytesPerSecond: Long): String {
+    val bits = bytesPerSecond * 8.0
+    return when {
+        bits < 1_000 -> "${bits.toLong()} b/s"
+        bits < 1_000_000 -> String.format(Locale.US, if (bits < 10_000) "%.1f kb/s" else "%.0f kb/s", bits / 1_000)
+        else -> String.format(Locale.US, if (bits < 10_000_000) "%.1f Mb/s" else "%.0f Mb/s", bits / 1_000_000)
+    }
+}
+
+fun formatLinkRate(kbps: Long): String =
+    if (kbps >= 1000) String.format(Locale.US, if (kbps % 1000 == 0L) "%.0f" else "%.1f", kbps / 1000.0) else "<1"
+
 fun formatSince(epochSeconds: Long, nowMillis: Long = System.currentTimeMillis()): String {
     if (epochSeconds <= 0) return ""
     val s = (nowMillis / 1000 - epochSeconds).coerceAtLeast(0)

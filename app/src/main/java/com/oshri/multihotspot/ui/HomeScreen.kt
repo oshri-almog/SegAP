@@ -23,6 +23,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Description
@@ -165,6 +167,7 @@ fun HomeScreen(onSettings: () -> Unit, onLog: () -> Unit, onEditGroup: (String?)
                     color = groupColor(idx),
                     connected = status.clients.count { it.groupId == g.id },
                     strictIsolation = config.strictIsolation,
+                    reachNames = g.canReach.mapNotNull { id -> config.group(id)?.name },
                     onEdit = { onEditGroup(g.id) },
                     onQr = { qrFor = g },
                 )
@@ -320,7 +323,15 @@ private fun StatusCard(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun GroupCard(group: Group, color: Color, connected: Int, strictIsolation: Boolean, onEdit: () -> Unit, onQr: () -> Unit) {
+private fun GroupCard(
+    group: Group,
+    color: Color,
+    connected: Int,
+    strictIsolation: Boolean,
+    reachNames: List<String>,
+    onEdit: () -> Unit,
+    onQr: () -> Unit,
+) {
     var showPw by remember { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
     Card(Modifier.fillMaxWidth().clickable(onClick = onEdit)) {
@@ -355,6 +366,7 @@ private fun GroupCard(group: Group, color: Color, connected: Int, strictIsolatio
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Tag(if (group.internet) "Internet" else "No internet")
                     if (group.tailscale) Tag("Tailscale")
+                    if (reachNames.isNotEmpty()) Tag("Can reach ${reachNames.joinToString(", ")}")
                     Tag(
                         when {
                             !strictIsolation -> "Not isolated (strict isolation off)"
@@ -379,22 +391,48 @@ private fun ClientRow(
     onBlock: () -> Unit,
 ) {
     var menu by remember { mutableStateOf(false) }
+    val active = client.uploadRate + client.downloadRate > 1024
     Card(Modifier.fillMaxWidth()) {
-        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(12.dp).background(color, CircleShape))
-            Spacer(Modifier.width(12.dp))
+        Row(Modifier.padding(start = 12.dp, top = 12.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            // Signal: animated bars + dBm
+            Column(Modifier.width(56.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                SignalIcon(rssi = client.rssi, active = active)
+                Text(
+                    client.rssi?.let { "$it dBm" } ?: "- dBm",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
+            Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(client.hostname ?: "Unknown device", style = MaterialTheme.typography.titleSmall)
                     if (hasFixedIp) Icon(Icons.Default.PushPin, contentDescription = "Fixed IP", modifier = Modifier.padding(start = 4.dp).size(14.dp))
                 }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.size(8.dp).background(color, CircleShape))
+                    Spacer(Modifier.width(6.dp))
+                    Text("${client.ip ?: "getting address..."} · $groupName", style = MaterialTheme.typography.bodyMedium)
+                }
+                // Current traffic, from the device's point of view.
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.padding(top = 2.dp)) {
+                    RateText(Icons.Default.ArrowDownward, "Download", client.downloadRate)
+                    RateText(Icons.Default.ArrowUpward, "Upload", client.uploadRate)
+                }
                 Text(
-                    "${client.ip ?: "getting address..."} · $groupName",
-                    style = MaterialTheme.typography.bodyMedium,
+                    listOf(
+                        "Used ${formatBytes(client.totalBytes)}",
+                        formatSince(client.connectedSinceEpoch),
+                    ).filter { it.isNotBlank() }.joinToString(" · "),
+                    style = MaterialTheme.typography.bodySmall,
                 )
                 Text(
-                    listOf(client.mac, formatSince(client.connectedSinceEpoch), "sent ${formatBytes(client.uploadBytes)}")
-                        .filter { it.isNotBlank() }.joinToString(" · "),
+                    listOfNotNull(
+                        client.mac,
+                        if (client.linkDownKbps != null && client.linkUpKbps != null)
+                            "link ${formatLinkRate(client.linkDownKbps)}/${formatLinkRate(client.linkUpKbps)} Mb/s" else null,
+                    ).joinToString(" · "),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -415,6 +453,20 @@ private fun ClientRow(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun RateText(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, bytesPerSecond: Long) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Icon(icon, contentDescription = label, modifier = Modifier.size(14.dp),
+            tint = if (bytesPerSecond > 1024) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(
+            formatRate(bytesPerSecond),
+            style = MaterialTheme.typography.bodyMedium,
+            fontFamily = FontFamily.Monospace,
+            modifier = Modifier.padding(start = 2.dp),
+        )
     }
 }
 

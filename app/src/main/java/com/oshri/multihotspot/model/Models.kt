@@ -19,6 +19,8 @@ data class Group(
     val dns2: String = "8.8.8.8",
     /** Devices in this group can reach the Tailscale network the phone is signed in to. */
     val tailscale: Boolean = false,
+    /** Ids of other groups whose devices this group may open connections to (one-way; replies are allowed). */
+    val canReach: List<String> = emptyList(),
 ) {
     val networkCidr: String
         get() {
@@ -122,8 +124,21 @@ data class Client(
     val ip: String?,
     val hostname: String?,
     val connectedSinceEpoch: Long,
+    /** Bytes the device sent (its upload) this connection. */
     val uploadBytes: Long,
-)
+    /** Bytes sent to the device (its download) this connection; null if the driver doesn't report it. */
+    val downloadBytes: Long? = null,
+    /** Average received signal strength in dBm; null if unknown. */
+    val rssi: Int? = null,
+    /** PHY rate of the last frame phone -> device / device -> phone, kbit/s. */
+    val linkDownKbps: Long? = null,
+    val linkUpKbps: Long? = null,
+    /** Current throughput in bytes/s, computed by the app from successive samples. */
+    val uploadRate: Long = 0,
+    val downloadRate: Long = 0,
+) {
+    val totalBytes: Long get() = uploadBytes + (downloadBytes ?: 0)
+}
 
 data class EngineStatus(
     val state: EngineState = EngineState.UNKNOWN,
@@ -153,11 +168,17 @@ data class EngineStatus(
                     inLog -> if (line.isNotBlank()) log += line
                     line.startsWith("CLIENT ") -> {
                         // CLIENT <mac> <group> <ip|-> <hostname|-> <since-epoch> <upload-bytes>
+                        //        [<download-bytes|-> <rssi-dbm|-> <link-down-kbps|-> <link-up-kbps|->]
                         val p = line.split(" ")
+                        fun opt(i: Int) = p.getOrNull(i)?.takeIf { it != "-" }
                         if (p.size >= 7) clients += Client(
                             mac = p[1], groupId = p[2],
                             ip = p[3].takeIf { it != "-" }, hostname = p[4].takeIf { it != "-" && it != "*" },
                             connectedSinceEpoch = p[5].toLongOrNull() ?: 0, uploadBytes = p[6].toLongOrNull() ?: 0,
+                            downloadBytes = opt(7)?.toLongOrNull(),
+                            rssi = opt(8)?.toIntOrNull()?.takeIf { it in -120..0 },
+                            linkDownKbps = opt(9)?.toLongOrNull(),
+                            linkUpKbps = opt(10)?.toLongOrNull(),
                         )
                     }
                     line.contains('=') -> {

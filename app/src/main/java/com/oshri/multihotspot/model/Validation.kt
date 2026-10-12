@@ -63,6 +63,10 @@ object Validation {
         if (c.groups.size > MAX_GROUPS) errors += "At most $MAX_GROUPS networks"
 
         c.groups.forEach { g -> group(g).forEach { errors += "${g.name}: $it" } }
+        c.groups.forEach { g ->
+            g.canReach.filter { id -> id == g.id || c.groups.none { it.id == id } }
+                .forEach { errors += "${g.name}: allowed to reach a network that no longer exists" }
+        }
 
         c.groups.groupBy { it.id }.filter { it.value.size > 1 }.keys.forEach { errors += "Duplicate network id $it" }
         c.groups.filter { !it.id.matches(Regex("^[a-z0-9]{1,16}$")) }.forEach { errors += "${it.name}: bad internal id" }
