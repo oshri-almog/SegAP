@@ -129,7 +129,7 @@ class HotspotService : Service() {
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_hotspot)
-            .setContentTitle("MultiHotspot")
+            .setContentTitle(getString(R.string.app_name))
             .setContentText(text)
             .setOngoing(true)
             .setOnlyAlertOnce(true)

@@ -68,6 +68,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -75,6 +76,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.oshri.multihotspot.HotspotController
+import com.oshri.multihotspot.R
 import com.oshri.multihotspot.model.Client
 import com.oshri.multihotspot.model.EngineState
 import com.oshri.multihotspot.model.Group
@@ -104,7 +106,7 @@ fun HomeScreen(onSettings: () -> Unit, onLog: () -> Unit, onEditGroup: (String?)
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("MultiHotspot") },
+                title = { Text(stringResource(R.string.app_name)) },
                 actions = {
                     IconButton(onClick = onLog) { Icon(Icons.Default.Description, contentDescription = "Log") }
                     IconButton(onClick = onSettings) { Icon(Icons.Default.Settings, contentDescription = "Settings") }
@@ -121,8 +123,8 @@ fun HomeScreen(onSettings: () -> Unit, onLog: () -> Unit, onEditGroup: (String?)
             if (root == false) item {
                 MessageCard(
                     title = "No root access",
-                    text = "MultiHotspot needs root. On this phone Magisk only loads when booting through recovery: " +
-                        "run `adb reboot recovery` (or use the Magisk key combo), then allow root for MultiHotspot.",
+                    text = "SegAP needs root. On this phone Magisk only loads when booting through recovery: " +
+                        "run `adb reboot recovery` (or use the Magisk key combo), then allow root for SegAP.",
                     error = true,
                 )
             }

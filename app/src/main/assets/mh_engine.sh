@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# MultiHotspot engine - runs as root (via su).
+# SegAP engine - runs as root (via su).
 #
 # One access point, several passwords. Each password (hostapd keyid) is a "group"
 # with its own subnet, DHCP range, DNS and firewall policy.

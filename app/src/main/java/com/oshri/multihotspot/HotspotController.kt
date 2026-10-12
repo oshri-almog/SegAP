@@ -116,7 +116,7 @@ object HotspotController {
             return false
         }
         if (!checkRoot()) {
-            _error.value = "Root access is not available. Reboot through recovery (adb reboot recovery) so Magisk loads, then grant root to MultiHotspot."
+            _error.value = "Root access is not available. Reboot through recovery (adb reboot recovery) so Magisk loads, then grant root to SegAP."
             return false
         }
         _error.value = null
