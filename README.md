@@ -5,7 +5,11 @@ Devices that join with the *Home* password land in the Home LAN, the *Guest* pas
 isolated guest LAN, the *IoT* password in a LAN without internet, and so on. Every network gets its own
 subnet, gateway, DHCP range, DNS and firewall policy.
 
-<p align="center"><img src="docs/screenshot.jpg" alt="SegAP main screen: three networks and connected devices with signal and traffic" width="360"></p>
+<p align="center">
+<img src="docs/screenshots/status.png" alt="Status tab: the hotspot is on, connected devices with signal and live traffic" width="270">
+&nbsp;
+<img src="docs/screenshots/networks.png" alt="Networks tab: Home, Guest and IoT, each with its own password and subnet" width="270">
+</p>
 
 Built for (and tested on) a rooted **Samsung Galaxy S10 (SM-G973F, Exynos, Android 12 / One UI 4.1, Magisk)**.
 Without root, SegAP can still run the phone's own hotspot with one network through Shizuku — see
@@ -37,6 +41,35 @@ Without root, SegAP can still run the phone's own hotspot with one network throu
 - **Two engines**: root (everything above) or, without root, [Shizuku](#without-root-the-shizuku-engine)
   (the phone's own hotspot, one network; root-only settings are greyed out).
 
+## Screenshots
+
+From the Galaxy S10 with the root engine (for the no-root mode see [Without root](#without-root-the-shizuku-engine),
+for Tailscale [below](#tailscale-exit-nodes-and-shared-networks)). MAC addresses and tailnet addresses are
+blurred, and the QR code is replaced by a sample.
+
+<table>
+<tr>
+<td align="center" valign="top" width="33%"><img src="docs/screenshots/status.png" width="250" alt="Status tab"><br><sub><b>Status</b> — hotspot, internet source, Tailscale, connected devices with signal and live traffic</sub></td>
+<td align="center" valign="top" width="33%"><img src="docs/screenshots/device-menu.png" width="250" alt="Device actions menu"><br><sub>Device actions: give it a fixed IP, or block it</sub></td>
+<td align="center" valign="top" width="33%"><img src="docs/screenshots/networks.png" width="250" alt="Networks tab"><br><sub><b>Networks</b> — one password each: show, QR code, copy, edit</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><img src="docs/screenshots/hotspot.png" width="250" alt="Hotspot tab"><br><sub><b>Hotspot</b> — Wi-Fi name, hidden, channel, max devices, the phone's own Wi-Fi</sub></td>
+<td align="center" valign="top" width="33%"><img src="docs/screenshots/hotspot-advanced.png" width="250" alt="Hotspot tab, lower part"><br><sub>Strict isolation, BSSID, radio interface, and the engine (root / Shizuku)</sub></td>
+<td align="center" valign="top" width="33%"><img src="docs/screenshots/qr.png" width="250" alt="QR code dialog"><br><sub>QR code to join a network (a sample code here: the real one holds the password)</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><img src="docs/screenshots/network-editor.png" width="250" alt="Network editor"><br><sub>Network editor — password and addressing: gateway, DHCP range, lease time, DNS</sub></td>
+<td align="center" valign="top" width="33%"><img src="docs/screenshots/network-other.png" width="250" alt="Network editor, lower part"><br><sub>Access to other networks, and the network's fixed IPs</sub></td>
+<td align="center" valign="top" width="33%"><img src="docs/screenshots/fixed-ips.png" width="250" alt="Fixed IPs tab"><br><sub><b>Fixed IPs</b> & blocked devices of all networks</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><img src="docs/screenshots/fixed-ip-add.png" width="250" alt="Add fixed IP dialog"><br><sub>Adding a fixed IP: network, device MAC, address</sub></td>
+<td align="center" valign="top" width="33%"><img src="docs/screenshots/logs.png" width="250" alt="Logs tab"><br><sub><b>Logs</b> — engine state and log; the radio log on request</sub></td>
+<td></td>
+</tr>
+</table>
+
 ## Why one SSID with several passwords (and not several SSIDs)?
 
 The goal was several SSIDs with separate LANs. Testing on the S10 showed what its Broadcom BCM4375 /
@@ -46,7 +79,7 @@ Samsung `bcmdhd` driver allows:
 |---|---|
 | Multiple SSIDs on one interface (hostapd `bss=`) | Kernel panic in `wl_cfg80211_set_channel` |
 | Second AP on the other interface (wlan0 + swlan0) | Driver refuses: `Beacon set failed: Operation not permitted` |
-| 5 GHz AP | Refused under the IL regulatory domain (Samsung's own hotspot falls back to 2.4 GHz too) |
+| 5 GHz AP (SegAP's own) | Refused when tested under the IL regulatory domain. The phone's own hotspot does run on 5 GHz (channel 149), which the [Shizuku engine](#without-root-the-shizuku-engine) can use |
 | **One AP, several passphrases (hostapd `wpa_psk_file` with `keyid=`)** | **Works** — the `keyid` of the password a device used is reported on connect |
 
 So SegAP runs a single access point, and the password a device used decides its network.
@@ -115,6 +148,14 @@ usual routing rules never touch Android's. The engine routes the network into it
 and switches back and forth automatically. Sign-in happens in the network editor (link or QR code); the login
 is kept in `/data/adb/multihotspot/ts/<network>/`. Deleting the network signs its device out.
 
+<table>
+<tr>
+<td align="center" valign="top" width="33%"><img src="docs/screenshots/network-access.png" width="250" alt="Network editor: access and Tailscale"><br><sub>Per network: access to the tailnet, and the network's own Tailscale device sharing its subnet</sub></td>
+<td align="center" valign="top" width="33%"><img src="docs/screenshots/network-exit-node.png" width="250" alt="Network editor: exit node picker"><br><sub>Choosing the network's exit node from your tailnet's exit nodes</sub></td>
+<td></td>
+</tr>
+</table>
+
 Tailscale is © Tailscale Inc. & contributors, BSD-3-Clause (https://github.com/tailscale/tailscale); SegAP
 doesn't redistribute it, the app downloads the official package.
 
@@ -138,6 +179,20 @@ start and stop it, but not to run SegAP's own access point, DHCP server or firew
 | Device list | signal, traffic, link rate | name, IP, time connected |
 
 Root-only settings stay visible but greyed out, with the reason, and are kept for when root is available.
+Screenshots from the Galaxy S10 with the Shizuku engine:
+
+<table>
+<tr>
+<td align="center" valign="top" width="33%"><img src="docs/screenshots/shizuku-status.png" width="250" alt="Status with the Shizuku engine"><br><sub>Status: the phone's own hotspot, here on 5 GHz; devices with name, IP and time connected</sub></td>
+<td align="center" valign="top" width="33%"><img src="docs/screenshots/shizuku-hotspot.png" width="250" alt="Hotspot tab with the Shizuku engine"><br><sub>Band and channel (2.4 / 5 GHz) and max devices; root-only settings greyed out</sub></td>
+<td align="center" valign="top" width="33%"><img src="docs/screenshots/shizuku-engine.png" width="250" alt="Engine choice with the Shizuku engine"><br><sub>The engine choice; isolation, BSSID and radio settings need root</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><img src="docs/screenshots/shizuku-networks.png" width="250" alt="Networks tab with the Shizuku engine"><br><sub>Only the first network is used; the others need root</sub></td>
+<td align="center" valign="top" width="33%"><img src="docs/screenshots/shizuku-network-editor.png" width="250" alt="Network editor with the Shizuku engine"><br><sub>In the network editor, what needs root is greyed out with the reason</sub></td>
+<td align="center" valign="top" width="33%"><img src="docs/screenshots/shizuku-fixed-ips.png" width="250" alt="Fixed IPs tab with the Shizuku engine"><br><sub>Fixed IPs need root; blocking needs the phone's hotspot to support it</sub></td>
+</tr>
+</table>
 
 Setup: install Shizuku and start it (with wireless debugging on Android 11+, or over `adb`; again after every
 reboot), then open SegAP and tap **Allow SegAP in Shizuku**. The **Engine** setting at the bottom of the Hotspot
@@ -214,7 +269,8 @@ edit `$ndk` if yours is elsewhere). On Linux/macOS:
 
 ## Limitations
 
-- Root engine: one access point, 2.4 GHz only (driver / regulatory, see above); up to 10 clients (driver limit).
+- Root engine: one access point, 2.4 GHz only (5 GHz was refused when tested, see above; the Shizuku engine can use
+  5 GHz where the phone allows it); up to 10 clients (driver limit).
 - Up to 8 networks; each needs its own password (8–63 printable ASCII characters, no leading/trailing space).
 - IPv4 only. With *strict isolation* turned off (needed for casting/discovery), devices on all networks can
   reach each other directly over Wi-Fi.
