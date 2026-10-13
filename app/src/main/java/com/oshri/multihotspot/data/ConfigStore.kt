@@ -59,6 +59,8 @@ class ConfigStore(private val file: File) {
                 }
             })
             put("blockedMacs", JSONArray(c.blockedMacs))
+            put("band5", c.band5)
+            put("channel5", c.channel5)
         }
 
         fun fromJson(o: JSONObject): HotspotConfig {
@@ -99,6 +101,8 @@ class ConfigStore(private val file: File) {
                 groups = groups,
                 staticLeases = leases,
                 blockedMacs = blocked,
+                band5 = o.optBoolean("band5", false),
+                channel5 = o.optInt("channel5", 0),
             )
         }
     }

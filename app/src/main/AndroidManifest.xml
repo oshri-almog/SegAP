@@ -9,6 +9,11 @@
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Shizuku engine: see whether the Shizuku app is installed. -->
+    <queries>
+        <package android:name="moe.shizuku.privileged.api" />
+    </queries>
+
     <application
         android:name=".MultiHotspotApp"
         android:allowBackup="false"
@@ -33,5 +38,14 @@
             android:name=".service.HotspotService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
+
+        <!-- Receives the Shizuku binder (Shizuku engine). -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:multiprocess="false"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
     </application>
 </manifest>

@@ -56,11 +56,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.oshri.multihotspot.HotspotController
+import com.oshri.multihotspot.engine.BackendKind
 import com.oshri.multihotspot.model.Client
 import com.oshri.multihotspot.model.EngineState
+import com.oshri.multihotspot.model.EngineStatus
+import com.oshri.multihotspot.model.HotspotConfig
 import com.oshri.multihotspot.model.StaticLease
-import com.oshri.multihotspot.model.Validation
-import com.oshri.multihotspot.model.normalized
 import kotlinx.coroutines.launch
 
 /** Tab 1: hotspot on/off, problems, connected devices. */
@@ -71,10 +72,12 @@ fun StatusTab(padding: PaddingValues) {
     val status by HotspotController.status.collectAsStateWithLifecycle()
     val busy by HotspotController.busy.collectAsStateWithLifecycle()
     val error by HotspotController.error.collectAsStateWithLifecycle()
-    val root by HotspotController.rootAvailable.collectAsStateWithLifecycle()
+    val backend by HotspotController.backend.collectAsStateWithLifecycle()
+    val checked by HotspotController.engineChecked.collectAsStateWithLifecycle()
+    val caps = capabilities()
     val scope = rememberCoroutineScope()
     val snackbar = LocalSnackbar.current
-    val problems = remember(config) { Validation.config(config) }
+    val problems = remember(config, backend) { HotspotController.problems(config, backend) }
 
     var fixedIpFor by remember { mutableStateOf<Client?>(null) }
     var blockFor by remember { mutableStateOf<Client?>(null) }
@@ -84,30 +87,25 @@ fun StatusTab(padding: PaddingValues) {
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        if (root == false) item {
-            MessageCard(
-                title = "No root access",
-                text = "SegAP needs root. On this phone Magisk only loads when booting through recovery: " +
-                    "run `adb reboot recovery` (or use the Magisk key combo), then allow root for SegAP.",
-                error = true,
-            )
-        }
+        if (checked && backend == null) item { EngineSetupCard() }
 
         item {
             StatusCard(
                 state = status.state,
                 reason = status.reason,
                 ssid = config.ssid,
-                channel = config.channel,
+                radio = radioLine(config, status, backend),
+                bandNote = bandNote(config, status, backend),
+                engine = backend,
                 upstream = status.upstream,
                 devices = status.clients.size,
                 busy = busy,
                 // applied == null while running: started outside the app (or app data cleared) - offer to apply ours.
-                pendingChanges = status.state == EngineState.RUNNING && applied?.normalized() != config.normalized(),
-                canStart = problems.isEmpty() && root != false,
+                pendingChanges = HotspotController.needsApply(applied, config, status, backend),
+                canStart = problems.isEmpty() && backend != null,
                 // Something may still be up after a failure: always allow cleaning up.
                 canStop = status.state == EngineState.RUNNING || status.hostapdAlive || status.dhcpAlive || status.daemonAlive,
-                tailscaleWanted = config.groups.any { it.tailscale },
+                tailscaleWanted = caps.tailscale && config.groups.any { it.tailscale },
                 tailscaleIface = status.tailscale,
                 exits = status.exits.map { e ->
                     val g = config.group(e.groupId)
@@ -165,7 +163,10 @@ fun StatusTab(padding: PaddingValues) {
                 groupName = config.group(c.groupId)?.name ?: c.groupId,
                 color = groupColor(idx),
                 // Only a fixed IP in the network it joined applies to it.
-                hasFixedIp = config.staticLeases.any { it.mac.equals(c.mac, ignoreCase = true) && it.groupId == c.groupId },
+                hasFixedIp = caps.fixedIps && config.staticLeases.any { it.mac.equals(c.mac, ignoreCase = true) && it.groupId == c.groupId },
+                stats = caps.deviceStats,
+                canFixIp = caps.fixedIps,
+                canBlock = caps.blocking,
                 onFixedIp = { fixedIpFor = c },
                 onBlock = { blockFor = c },
             )
@@ -209,6 +210,24 @@ fun StatusTab(padding: PaddingValues) {
     }
 }
 
+/** Band and channel: the hotspot's actual frequency while the phone's own hotspot runs, else the settings. */
+fun radioLine(config: HotspotConfig, status: EngineStatus, backend: BackendKind?): String {
+    val f = status.frequencyMhz
+    return when {
+        backend == BackendKind.SHIZUKU && status.state == EngineState.RUNNING && f > 0 ->
+            if (f < 3000) "2.4 GHz channel ${(f - 2407) / 5} ($f MHz)" else "5 GHz channel ${(f - 5000) / 5} ($f MHz)"
+        backend == BackendKind.SHIZUKU && config.band5 ->
+            if (config.channel5 == 0) "5 GHz, channel chosen by the phone" else "5 GHz channel ${config.channel5}"
+        else -> "2.4 GHz channel ${config.channel} (${channelFrequency(config.channel)} MHz)"
+    }
+}
+
+/** 5 GHz was chosen but the phone's hotspot runs on 2.4 GHz: the phone decides when it can't (its own Wi-Fi, country). */
+fun bandNote(config: HotspotConfig, status: EngineStatus, backend: BackendKind?): String? =
+    if (backend == BackendKind.SHIZUKU && status.state == EngineState.RUNNING && config.band5 && status.frequencyMhz in 1..2999)
+        "5 GHz isn't possible right now, so the phone uses 2.4 GHz. This usually happens while the phone itself is on Wi-Fi."
+    else null
+
 /** Snackbar text after a settings change: while the hotspot runs, changes wait for Apply. */
 fun savedMessage(what: String, state: EngineState): String =
     if (state == EngineState.RUNNING) "$what - tap Apply changes" else what
@@ -222,10 +241,10 @@ fun PendingChangesBar() {
     val applied by HotspotController.applied.collectAsStateWithLifecycle()
     val status by HotspotController.status.collectAsStateWithLifecycle()
     val busy by HotspotController.busy.collectAsStateWithLifecycle()
-    val root by HotspotController.rootAvailable.collectAsStateWithLifecycle()
-    val pending = status.state == EngineState.RUNNING && applied?.normalized() != config.normalized()
+    val backend by HotspotController.backend.collectAsStateWithLifecycle()
+    val pending = HotspotController.needsApply(applied, config, status, backend)
     if (!pending && busy == null) return
-    val problems = remember(config) { Validation.config(config) }
+    val problems = remember(config, backend) { HotspotController.problems(config, backend) }
     Surface(color = MaterialTheme.colorScheme.tertiaryContainer, contentColor = MaterialTheme.colorScheme.onTertiaryContainer) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -238,7 +257,7 @@ fun PendingChangesBar() {
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.weight(1f),
                 )
-                if (busy == null && problems.isEmpty() && root != false) {
+                if (busy == null && problems.isEmpty() && backend != null) {
                     Button(onClick = { HotspotController.startAsync() }) { Text("Apply changes") }
                 }
             }
@@ -252,7 +271,10 @@ private fun StatusCard(
     state: EngineState,
     reason: String,
     ssid: String,
-    channel: Int,
+    radio: String,
+    /** Why the hotspot runs on another band than chosen, if it does. */
+    bandNote: String?,
+    engine: BackendKind?,
     upstream: String,
     devices: Int,
     busy: String?,
@@ -286,13 +308,17 @@ private fun StatusCard(
                             EngineState.RUNNING -> "Hotspot is on"
                             EngineState.STARTING -> "Starting..."
                             EngineState.FAILED -> "Hotspot stopped (error)"
+                            EngineState.UNKNOWN -> if (reason.isNotBlank()) "Hotspot state unknown" else "Hotspot is off"
                             else -> "Hotspot is off"
                         },
                         style = MaterialTheme.typography.titleLarge,
                     )
-                    Text(
-                        "$ssid · 2.4 GHz channel $channel (${channelFrequency(channel)} MHz)",
-                        style = MaterialTheme.typography.bodyMedium,
+                    Text("$ssid · $radio", style = MaterialTheme.typography.bodyMedium)
+                    if (bandNote != null) Text(bandNote, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    if (engine == BackendKind.SHIZUKU) Text(
+                        "Shizuku engine · the phone's own hotspot",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     if (running) Text(
                         (if (upstream.isBlank()) "No internet source" else "Internet via $upstream") + " · $devices device${if (devices == 1) "" else "s"}",
@@ -311,7 +337,7 @@ private fun StatusCard(
                             color = if (ok) Color.Unspecified else MaterialTheme.colorScheme.error,
                         )
                     }
-                    if (state == EngineState.FAILED && reason.isNotBlank()) Text(
+                    if ((state == EngineState.FAILED || state == EngineState.UNKNOWN) && reason.isNotBlank()) Text(
                         reason,
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.error,
@@ -349,6 +375,10 @@ private fun ClientRow(
     groupName: String,
     color: Color,
     hasFixedIp: Boolean,
+    /** Signal, traffic and link rate are known (root engine). */
+    stats: Boolean,
+    canFixIp: Boolean,
+    canBlock: Boolean,
     onFixedIp: () -> Unit,
     onBlock: () -> Unit,
 ) {
@@ -357,7 +387,7 @@ private fun ClientRow(
     Card(Modifier.fillMaxWidth()) {
         Row(Modifier.padding(start = 12.dp, top = 12.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             // Signal: animated bars + dBm
-            Column(Modifier.width(56.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            if (stats) Column(Modifier.width(56.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 SignalIcon(rssi = client.rssi, active = active)
                 Text(
                     client.rssi?.let { "$it dBm" } ?: "- dBm",
@@ -366,7 +396,7 @@ private fun ClientRow(
                     modifier = Modifier.padding(top = 2.dp),
                 )
             }
-            Spacer(Modifier.width(10.dp))
+            Spacer(Modifier.width(if (stats) 10.dp else 4.dp))
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(client.hostname ?: "Unknown device", style = MaterialTheme.typography.titleSmall)
@@ -378,14 +408,18 @@ private fun ClientRow(
                     Text("${client.ip ?: "getting address..."} · $groupName", style = MaterialTheme.typography.bodyMedium)
                 }
                 // Current traffic, from the device's point of view.
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.padding(top = 2.dp)) {
+                if (stats) Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.padding(top = 2.dp)) {
                     // No driver stats -> no download counter: show "–", not a misleading 0.
                     RateText(Icons.Default.ArrowDownward, "Download", client.downloadRate.takeIf { client.downloadBytes != null })
                     RateText(Icons.Default.ArrowUpward, "Upload", client.uploadRate)
                 }
                 Text(
                     listOf(
-                        if (client.downloadBytes != null) "Used ${formatBytes(client.totalBytes)}" else "Sent ${formatBytes(client.uploadBytes)}",
+                        when {
+                            !stats -> ""
+                            client.downloadBytes != null -> "Used ${formatBytes(client.totalBytes)}"
+                            else -> "Sent ${formatBytes(client.uploadBytes)}"
+                        },
                         formatSince(client.connectedSinceEpoch),
                     ).filter { it.isNotBlank() }.joinToString(" · "),
                     style = MaterialTheme.typography.bodySmall,
@@ -408,12 +442,24 @@ private fun ClientRow(
                     DropdownMenuItem(
                         text = { Text(if (hasFixedIp) "Change fixed IP" else "Give fixed IP") },
                         leadingIcon = { Icon(Icons.Default.PushPin, null) },
+                        enabled = canFixIp,
                         onClick = { menu = false; onFixedIp() },
                     )
                     DropdownMenuItem(
                         text = { Text("Block device") },
                         leadingIcon = { Icon(Icons.Default.Block, null) },
+                        enabled = canBlock,
                         onClick = { menu = false; onBlock() },
+                    )
+                    if (!canFixIp || !canBlock) Text(
+                        when {
+                            !canFixIp && !canBlock -> "Fixed IPs need root; this phone's hotspot can't block devices"
+                            !canFixIp -> "Fixed IPs need root"
+                            else -> PHONE_CANT
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp).width(220.dp),
                     )
                 }
             }

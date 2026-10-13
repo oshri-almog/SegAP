@@ -23,12 +23,14 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.oshri.multihotspot.HotspotController
+import com.oshri.multihotspot.engine.BackendKind
 import kotlinx.coroutines.launch
 
 /** Tab 5: engine log and, on request, the radio (hostapd) log. */
 @Composable
 fun LogsTab(padding: PaddingValues) {
     val status by HotspotController.status.collectAsStateWithLifecycle()
+    val backend by HotspotController.backend.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     // Not saveable: the log can be large (saved state has a size limit); it is re-fetched on demand.
     var radioLog by remember { mutableStateOf<String?>(null) }
@@ -38,7 +40,8 @@ fun LogsTab(padding: PaddingValues) {
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Text(
-            "Engine: ${status.state.name.lowercase()} · radio ${if (status.hostapdAlive) "up" else "down"} · " +
+            if (backend == BackendKind.SHIZUKU) "Shizuku engine (the phone's own hotspot): ${status.state.name.lowercase()}"
+            else "Engine: ${status.state.name.lowercase()} · radio ${if (status.hostapdAlive) "up" else "down"} · " +
                 "DHCP ${if (status.dhcpAlive) "up" else "down"} · monitor ${if (status.daemonAlive) "up" else "down"}",
             style = MaterialTheme.typography.bodyMedium,
         )
@@ -50,10 +53,11 @@ fun LogsTab(padding: PaddingValues) {
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
             )
         }
-        OutlinedButton(onClick = { scope.launch { radioLog = HotspotController.radioLog() } }) {
+        // The Shizuku engine has no radio log of its own: its log is the one above.
+        if (backend != BackendKind.SHIZUKU) OutlinedButton(onClick = { scope.launch { radioLog = HotspotController.radioLog() } }) {
             Text(if (radioLog == null) "Show radio (hostapd) log" else "Refresh radio (hostapd) log")
         }
-        radioLog?.let {
+        if (backend != BackendKind.SHIZUKU) radioLog?.let {
             SelectionContainer {
                 Text(it.ifBlank { "(empty)" }, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.horizontalScroll(rememberScrollState()))

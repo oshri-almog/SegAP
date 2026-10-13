@@ -8,3 +8,6 @@
 -keepclassmembers enum com.oshri.multihotspot.** {
     <fields>;
 }
+
+# Shizuku engine: runs in another process (Shizuku user service, or app_process for tests), started by class name.
+-keep class com.oshri.multihotspot.shizuku.** { *; }

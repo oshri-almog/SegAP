@@ -13,9 +13,11 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.oshri.multihotspot.HotspotController
+import com.oshri.multihotspot.engine.BackendKind
 import com.oshri.multihotspot.R
 import com.oshri.multihotspot.model.EngineState
 import com.oshri.multihotspot.ui.MainActivity
+import com.oshri.multihotspot.ui.radioLine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -59,7 +61,9 @@ class HotspotService : Service() {
         if (intent?.action == ACTION_STOP) {
             scope.launch {
                 HotspotController.stop()
-                stopSelf()
+                // Still on (or unreachable): keep the notification, so it can be stopped again.
+                if (HotspotController.owner.value == null) stopSelf()
+                else if (poller?.isActive != true) poller = scope.launch { pollLoop() }
             }
             return START_NOT_STICKY
         }
@@ -69,29 +73,38 @@ class HotspotService : Service() {
 
     private suspend fun pollLoop() {
         var stoppedCount = 0
+        var seenRunning = false
         while (scope.isActive) {
             HotspotController.refresh()
             val s = HotspotController.status.value
+            if (s.state == EngineState.RUNNING) seenRunning = true
+            // The engine cleans up after itself when the radio is lost: then nothing is alive any more.
+            val nothingAlive = !s.daemonAlive && !s.dhcpAlive && !s.hostapdAlive
+            // The phone's own hotspot (Shizuku) keeps reporting "failed" after a failed start: only a failure of a
+            // hotspot that was running is news.
+            val news = seenRunning || HotspotController.backend.value != BackendKind.SHIZUKU
             val c = HotspotController.config.value
             val text = when (s.state) {
                 EngineState.RUNNING -> {
                     val n = s.clients.size
-                    "${c.ssid} · ch ${c.channel} · $n device${if (n == 1) "" else "s"}" +
+                    "${c.ssid} · ${radioLine(c, s, HotspotController.backend.value)} · $n device${if (n == 1) "" else "s"}" +
                         (if (s.upstream.isBlank()) " · no internet source" else " · via ${s.upstream}") +
                         (if (s.tailscale.isNotBlank()) " · Tailscale" else "")
                 }
-                EngineState.FAILED -> "Hotspot stopped unexpectedly - open the app"
+                EngineState.FAILED -> if (news) "Hotspot stopped unexpectedly - open the app" else "Hotspot is off"
+                EngineState.UNKNOWN -> if (s.reason.isNotBlank()) "Can't check the hotspot - open the app" else "Hotspot is off"
                 else -> "Hotspot is off"
             }
             notify(text)
-            // The engine cleans up after itself when the radio is lost: then nothing is alive any more.
-            val nothingAlive = !s.daemonAlive && !s.dhcpAlive && !s.hostapdAlive
-            if (s.state == EngineState.FAILED && nothingAlive) {
+            // Starting or stopping (a restart passes through "stopped" or "failed"): wait for the outcome.
+            if (HotspotController.busy.value != null) { delay(3_000); continue }
+            if (s.state == EngineState.FAILED && nothingAlive && news) {
                 notifyStopped(s.reason.ifBlank { "Hotspot stopped unexpectedly." })
                 stopSelf(); return
             }
             // Stop the service once the engine has been off for a while (e.g. stopped from adb).
-            stoppedCount = if (s.state == EngineState.STOPPED) stoppedCount + 1 else 0
+            val off = s.state == EngineState.STOPPED || (s.state == EngineState.FAILED && nothingAlive)
+            stoppedCount = if (off) stoppedCount + 1 else 0
             if (stoppedCount >= 3) { stopSelf(); return }
             delay(if (s.state == EngineState.RUNNING) 5_000 else 3_000)
         }

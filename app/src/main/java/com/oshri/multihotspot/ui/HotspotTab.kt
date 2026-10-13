@@ -39,6 +39,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.oshri.multihotspot.HotspotController
+import com.oshri.multihotspot.engine.BackendKind
 import com.oshri.multihotspot.model.HotspotConfig
 import com.oshri.multihotspot.model.Mac
 import com.oshri.multihotspot.model.Validation
@@ -52,10 +53,15 @@ import kotlin.math.roundToInt
 fun HotspotTab(padding: PaddingValues) {
     val config by HotspotController.config.collectAsStateWithLifecycle()
     val status by HotspotController.status.collectAsStateWithLifecycle()
+    val backend by HotspotController.backend.collectAsStateWithLifecycle()
+    val caps = capabilities()
+    val shizuku = backend == BackendKind.SHIZUKU
     val snackbar = LocalSnackbar.current
     val scope = rememberCoroutineScope()
     var ssid by rememberSaveable { mutableStateOf(config.ssid) }
     var channel by rememberSaveable { mutableIntStateOf(config.channel) }
+    var band5 by rememberSaveable { mutableStateOf(config.band5) }
+    var channel5 by rememberSaveable { mutableIntStateOf(config.channel5) }
     var hidden by rememberSaveable { mutableStateOf(config.hidden) }
     var maxClients by rememberSaveable { mutableIntStateOf(config.maxClients) }
     var wifiMode by rememberSaveable { mutableStateOf(config.wifiMode) }
@@ -65,13 +71,14 @@ fun HotspotTab(padding: PaddingValues) {
     var errors by rememberSaveable { mutableStateOf<List<String>>(emptyList()) }
 
     fun edited(c: HotspotConfig) = c.copy(
-        ssid = ssid, channel = channel, hidden = hidden, maxClients = maxClients,
+        ssid = ssid, channel = channel, band5 = band5, channel5 = channel5, hidden = hidden, maxClients = maxClients,
         wifiMode = wifiMode, iface = iface, strictIsolation = strict, bssid = bssid,
     )
     val dirty = edited(config) != config
 
     fun discard() {
-        ssid = config.ssid; channel = config.channel; hidden = config.hidden; maxClients = config.maxClients
+        ssid = config.ssid; channel = config.channel; band5 = config.band5; channel5 = config.channel5
+        hidden = config.hidden; maxClients = config.maxClients
         wifiMode = config.wifiMode; iface = config.iface; strict = config.strictIsolation; bssid = config.bssid
         errors = emptyList()
     }
@@ -99,50 +106,90 @@ fun HotspotTab(padding: PaddingValues) {
             )
             SwitchRow("Hidden network", "Don't broadcast the name; devices must type it in.", hidden) { hidden = it }
 
-            SectionLabel("Channel (2.4 GHz)")
-            Text(
-                "Channel $channel · ${channelFrequency(channel)} MHz. 1, 6 and 11 don't overlap each other. " +
-                    "5 GHz isn't available: the phone's Wi-Fi firmware doesn't allow a 5 GHz hotspot in your country.",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                HotspotConfig.CHANNELS_24GHZ.forEach { ch ->
-                    FilterChip(selected = ch == channel, onClick = { channel = ch }, label = { Text("$ch") })
+            // Only the phone's own hotspot (Shizuku) can use 5 GHz: SegAP's access point (root) is limited by the firmware.
+            // Also while 5 GHz is chosen but not offered (any more): it must stay possible to switch back.
+            if (shizuku && (caps.band5GHz || band5)) {
+                SectionLabel("Band")
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    FilterChip(selected = !band5, onClick = { band5 = false }, label = { Text("2.4 GHz") })
+                    FilterChip(selected = band5, onClick = { band5 = true }, label = { Text("5 GHz") })
+                }
+            }
+            if (shizuku && band5) {
+                SectionLabel("Channel (5 GHz)")
+                Text(
+                    if (!caps.band5GHz) "This phone's hotspot doesn't offer 5 GHz right now; it will use 2.4 GHz."
+                    else "5 GHz is faster but reaches less far, and some older devices can't see it. While the phone itself is " +
+                        "on Wi-Fi, it may have to use that Wi-Fi's channel or fall back to 2.4 GHz.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    FilterChip(selected = channel5 == 0, onClick = { channel5 = 0 }, label = { Text("Auto") })
+                    caps.channels5.filter { it in HotspotConfig.CHANNELS_5GHZ }.forEach { ch ->
+                        FilterChip(selected = ch == channel5, onClick = { channel5 = ch }, label = { Text("$ch") })
+                    }
+                }
+            } else {
+                SectionLabel("Channel (2.4 GHz)")
+                Text(
+                    "Channel $channel · ${channelFrequency(channel)} MHz. 1, 6 and 11 don't overlap each other. " +
+                        when {
+                            !shizuku -> "5 GHz isn't available: the phone's Wi-Fi firmware doesn't allow a 5 GHz hotspot in your country."
+                            caps.band5GHz -> ""
+                            status.phoneHotspot == null -> ""
+                            else -> "This phone's hotspot doesn't offer 5 GHz here."
+                        },
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    HotspotConfig.CHANNELS_24GHZ.forEach { ch ->
+                        FilterChip(selected = ch == channel, onClick = { channel = ch }, label = { Text("$ch") })
+                    }
                 }
             }
 
-            SectionLabel("Max devices: $maxClients")
-            Slider(
-                value = maxClients.toFloat(), onValueChange = { maxClients = it.roundToInt() },
-                valueRange = 1f..Validation.MAX_CLIENTS.toFloat(), steps = Validation.MAX_CLIENTS - 2,
-            )
+            Gated(caps.maxClients, phoneReason(rootHas = true)) {
+                SectionLabel("Max devices: $maxClients")
+                Slider(
+                    value = maxClients.toFloat(), onValueChange = { maxClients = it.roundToInt() }, enabled = caps.maxClients,
+                    valueRange = 1f..Validation.MAX_CLIENTS.toFloat(), steps = Validation.MAX_CLIENTS - 2,
+                )
+            }
 
-            SectionLabel("Phone's own Wi-Fi while the hotspot runs")
-            RadioRow("Keep as is", "If the phone is on Wi-Fi, the hotspot shares that connection (repeater). Otherwise mobile data.",
-                wifiMode == WifiMode.KEEP) { wifiMode = WifiMode.KEEP }
-            RadioRow("Turn Wi-Fi off", "Always share mobile data. Wi-Fi is turned back on when the hotspot stops.",
-                wifiMode == WifiMode.OFF) { wifiMode = WifiMode.OFF }
+            Gated(caps.radioDetails) {
+                SectionLabel("Phone's own Wi-Fi while the hotspot runs")
+                RadioRow("Keep as is", "If the phone is on Wi-Fi, the hotspot shares that connection (repeater). Otherwise mobile data.",
+                    wifiMode == WifiMode.KEEP) { wifiMode = WifiMode.KEEP }
+                RadioRow("Turn Wi-Fi off", "Always share mobile data. Wi-Fi is turned back on when the hotspot stops.",
+                    wifiMode == WifiMode.OFF) { wifiMode = WifiMode.OFF }
+            }
 
-            SectionLabel("Isolation")
-            SwitchRow(
-                "Strict isolation (recommended)",
-                "On: all traffic between devices passes through the phone's firewall, so networks stay separated. " +
-                    "Off: ALL devices on ALL passwords, guests included, can reach each other directly over Wi-Fi " +
-                    "(needed for casting / device discovery). Per-network isolation is then not enforced.",
-                strict,
-            ) { strict = it }
+            Gated(caps.firewall) {
+                SectionLabel("Isolation")
+                SwitchRow(
+                    "Strict isolation (recommended)",
+                    "On: all traffic between devices passes through the phone's firewall, so networks stay separated. " +
+                        "Off: ALL devices on ALL passwords, guests included, can reach each other directly over Wi-Fi " +
+                        "(needed for casting / device discovery). Per-network isolation is then not enforced.",
+                    strict,
+                ) { strict = it }
+            }
 
-            SectionLabel("Advanced")
-            Text("Access point MAC (BSSID): $bssid", fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyMedium)
-            OutlinedButton(onClick = { bssid = Mac.randomLocal() }) { Text("New random BSSID") }
-            Text("Radio interface", style = MaterialTheme.typography.bodyLarge)
-            RadioRow("swlan0 (recommended)", "Works alongside the phone's own Wi-Fi connection.", iface == "swlan0") { iface = "swlan0" }
-            RadioRow("wlan0", "Only with the phone's Wi-Fi turned off.", iface == "wlan0") { iface = "wlan0"; wifiMode = WifiMode.OFF }
+            Gated(caps.radioDetails) {
+                SectionLabel("Advanced")
+                Text("Access point MAC (BSSID): $bssid", fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyMedium)
+                OutlinedButton(onClick = { bssid = Mac.randomLocal() }) { Text("New random BSSID") }
+                Text("Radio interface", style = MaterialTheme.typography.bodyLarge)
+                RadioRow("swlan0 (recommended)", "Works alongside the phone's own Wi-Fi connection.", iface == "swlan0") { iface = "swlan0" }
+                RadioRow("wlan0", "Only with the phone's Wi-Fi turned off.", iface == "wlan0") { iface = "wlan0"; wifiMode = WifiMode.OFF }
+            }
 
             Text(
                 "Saved settings take effect when you tap Apply changes (or at the next start).",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+
+            EngineSection()
             Spacer(Modifier.height(16.dp))
         }
         // Sticky, so Save is reachable without scrolling to the end.

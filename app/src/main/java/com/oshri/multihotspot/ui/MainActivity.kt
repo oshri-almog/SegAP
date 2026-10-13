@@ -112,7 +112,7 @@ fun AppRoot() {
     val lifecycleOwner = LocalLifecycleOwner.current
     LaunchedEffect(lifecycleOwner) {
         lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
-            HotspotController.checkRoot()
+            HotspotController.onVisible()
             while (true) {
                 HotspotController.refresh()
                 delay(2_000)

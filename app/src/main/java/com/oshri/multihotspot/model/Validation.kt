@@ -62,11 +62,16 @@ object Validation {
         return errors
     }
 
+    /** The Shizuku engine runs the first network only (no fixed IPs, no access to others): the rest needn't be valid. */
+    fun shizukuConfig(c: HotspotConfig): List<String> =
+        config(c.copy(groups = c.groups.take(1).map { it.copy(canReach = emptyList()) }, staticLeases = emptyList()))
+
     /** Whole-config check. Returns human-readable problems (empty list = OK to start). */
     fun config(c: HotspotConfig): List<String> {
         val errors = mutableListOf<String>()
         ssid(c.ssid)?.let { errors += it }
         if (c.channel !in HotspotConfig.CHANNELS_24GHZ) errors += "Channel must be 1-13"
+        if (c.channel5 != 0 && c.channel5 !in HotspotConfig.CHANNELS_5GHZ) errors += "5 GHz channel ${c.channel5} isn't supported"
         if (c.maxClients !in 1..MAX_CLIENTS) errors += "Max devices must be 1-$MAX_CLIENTS"
         if (Mac.normalize(c.bssid) == null) errors += "Invalid BSSID"
         if (c.iface !in listOf("swlan0", "wlan0")) errors += "Unknown radio interface ${c.iface}"

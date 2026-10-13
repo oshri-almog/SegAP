@@ -1,4 +1,4 @@
-# SegAP — segmented Wi-Fi hotspot for a rooted Android phone
+# SegAP — segmented Wi-Fi hotspot for Android (rooted, or a simpler mode without root)
 
 **One Wi-Fi name, several passwords — each password is its own network.**
 Devices that join with the *Home* password land in the Home LAN, the *Guest* password puts them in an
@@ -8,6 +8,8 @@ subnet, gateway, DHCP range, DNS and firewall policy.
 <p align="center"><img src="docs/screenshot.jpg" alt="SegAP main screen: three networks and connected devices with signal and traffic" width="360"></p>
 
 Built for (and tested on) a rooted **Samsung Galaxy S10 (SM-G973F, Exynos, Android 12 / One UI 4.1, Magisk)**.
+Without root, SegAP can still run the phone's own hotspot with one network through Shizuku — see
+[Without root](#without-root-the-shizuku-engine).
 
 ## Features
 
@@ -31,7 +33,9 @@ Built for (and tested on) a rooted **Samsung Galaxy S10 (SM-G973F, Exynos, Andro
 - Internet from the phone's **Wi-Fi (repeater mode) or mobile data**.
 - Full-screen app with five tabs: **Status** (hotspot and devices), **Hotspot** settings, **Networks**,
   **Fixed IPs** & blocked devices, **Logs**.
-- Foreground notification with device count; status is polled from the root engine.
+- Foreground notification with device count; status is polled from the engine.
+- **Two engines**: root (everything above) or, without root, [Shizuku](#without-root-the-shizuku-engine)
+  (the phone's own hotspot, one network; root-only settings are greyed out).
 
 ## Why one SSID with several passwords (and not several SSIDs)?
 
@@ -114,10 +118,45 @@ is kept in `/data/adb/multihotspot/ts/<network>/`. Deleting the network signs it
 Tailscale is © Tailscale Inc. & contributors, BSD-3-Clause (https://github.com/tailscale/tailscale); SegAP
 doesn't redistribute it, the app downloads the official package.
 
+## Without root: the Shizuku engine
+
+Without root, SegAP drives the phone's **own hotspot** through [Shizuku](https://shizuku.rikka.app/), which
+gives apps the rights of `adb shell`. That is enough to set the hotspot's name, password, band and channel and to
+start and stop it, but not to run SegAP's own access point, DHCP server or firewall. So with Shizuku:
+
+| | Root engine | Shizuku engine |
+|---|---|---|
+| Networks | up to 8 passwords, a LAN each | one: the first network's password |
+| Addresses, DHCP range, DNS, lease time | per network | chosen by Android |
+| Internet on/off, access between networks, strict isolation | yes | — |
+| Devices can't see each other | yes | if the phone's hotspot supports it (Samsung: yes) |
+| Max devices | yes | if the phone's hotspot supports it (Samsung: yes) |
+| Block devices | yes | only with driver support for client control (not on the S10 or S24) |
+| Fixed IPs | yes | — |
+| Tailscale (access, exit nodes, sharing) | yes | — |
+| Band | 2.4 GHz | 2.4 or 5 GHz, where the phone allows it |
+| Device list | signal, traffic, link rate | name, IP, time connected |
+
+Root-only settings stay visible but greyed out, with the reason, and are kept for when root is available.
+
+Setup: install Shizuku and start it (with wireless debugging on Android 11+, or over `adb`; again after every
+reboot), then open SegAP and tap **Allow SegAP in Shizuku**. The **Engine** setting at the bottom of the Hotspot
+tab picks **Automatic** (root when available, Shizuku otherwise — the default), **Root only** or **Shizuku
+only**; it can be changed while the hotspot is off.
+
+- Starting the hotspot from SegAP replaces the phone's own hotspot settings (name, password, band) with SegAP's.
+- While the phone itself is on Wi-Fi, its hotspot may have to use that Wi-Fi's channel or fall back to 2.4 GHz;
+  the Status tab shows the band actually in use.
+- How it works: Shizuku runs `shizuku/HotspotCore.kt` in its own process with the shell user's rights
+  (uid 2000). It sets the configuration through Android's `WifiManager` (and Samsung's Wi-Fi service when
+  present, for max devices and isolation) and starts tethering through `TetheringManager`.
+- Tested on the S10 (Android 12) and a Galaxy S24 Ultra (Android 16 / One UI 8.5).
+
 ## Requirements
 
 - Android 11+ (minSdk 30), rooted with **Magisk**. On the S10, Magisk lives in the recovery partition: a
   normal reboot starts *without* root — use `adb reboot recovery` (or the Magisk key combo) to boot with root.
+  Without root: [Shizuku](#without-root-the-shizuku-engine), with fewer features.
 - Android's vendor `hostapd` at `/vendor/bin/hw/hostapd` and `dnsmasq` at `/system/bin/dnsmasq`.
 - For per-device signal/traffic: arm64 and a Broadcom `bcmdhd` Wi-Fi driver (the bundled `libmhwl.so` is
   arm64-v8a only). Otherwise the app falls back to upload counters from the firewall and shows no signal.
@@ -129,8 +168,9 @@ Other phones may work but are untested; hotspot interface names, driver capabili
 ## Download
 
 Get the signed APK from [**Releases**](https://github.com/oshri-almog/SegAP/releases/latest), install it on the
-rooted phone, open SegAP and tap **Grant** when Magisk asks for root. Each release lists the APK's SHA-256 and
-the signing certificate's fingerprint.
+rooted phone, open SegAP and tap **Grant** when Magisk asks for root (without root, see
+[Shizuku](#without-root-the-shizuku-engine)). Each release lists the APK's SHA-256 and the signing certificate's
+fingerprint.
 
 ## Build & install
 
@@ -174,22 +214,26 @@ edit `$ndk` if yours is elsewhere). On Linux/macOS:
 
 ## Limitations
 
-- One access point, 2.4 GHz only (driver / regulatory, see above); up to 10 clients (driver limit).
+- Root engine: one access point, 2.4 GHz only (driver / regulatory, see above); up to 10 clients (driver limit).
 - Up to 8 networks; each needs its own password (8–63 printable ASCII characters, no leading/trailing space).
 - IPv4 only. With *strict isolation* turned off (needed for casting/discovery), devices on all networks can
   reach each other directly over Wi-Fi.
-- Root is required; this is a personal project, not a Play Store app.
+- Without root only the Shizuku engine's subset works (see above). This is a personal project, not a Play Store
+  app.
 
 ## Project layout
 
 ```
 app/src/main/assets/mh_engine.sh   root engine
-app/src/main/java/.../engine        RootShell, Engine (script install/start/stop/status, Tailscale instances), ConfigWriter,
-                                    TailscalePackage (pinned download)
+app/src/main/java/.../engine        HotspotBackend (root / Shizuku engines and their capabilities), RootShell, Engine
+                                    (script install/start/stop/status, Tailscale instances), ConfigWriter,
+                                    TailscalePackage (pinned download), ShizukuBackend / ShizukuSupport
+app/src/main/java/.../shizuku       HotspotUserService + HotspotCore (the phone's hotspot, run as shell by Shizuku)
+app/src/main/aidl/                  IHotspotService (app <-> Shizuku service)
 app/src/main/java/.../model         config model, IPv4/MAC helpers, validation, rate tracking
 app/src/main/java/.../ui            Compose screens (tabs: status, hotspot, networks, fixed IPs, logs; network editor; QR)
 app/src/main/java/.../service       foreground service (notification, status polling)
 app/src/main/java/.../root          HostapdCtl (optional root hostapd control client for debugging)
 native/                             mhwl.c (Broadcom sta_info reader) + build script
-app/src/test/                       unit tests (model, config writer, QR round-trip, rates, engine script guards)
+app/src/test/                       unit tests (model, config writer, QR round-trip, rates, engine script guards, Shizuku engine)
 ```

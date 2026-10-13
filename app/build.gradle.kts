@@ -58,6 +58,8 @@ android {
 
     buildFeatures {
         compose = true
+        aidl = true
+        buildConfig = true
     }
 
     packaging {
@@ -82,6 +84,9 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("com.google.zxing:core:3.5.3")
+    // Shizuku engine (no root): ADB-level rights through the Shizuku app.
+    implementation("dev.rikka.shizuku:api:13.1.5")
+    implementation("dev.rikka.shizuku:provider:13.1.5")
     debugImplementation("androidx.compose.ui:ui-tooling")
     implementation("androidx.compose.ui:ui-tooling-preview")
 

@@ -57,7 +57,8 @@ fun NetworksTab(padding: PaddingValues, onEditGroup: (String?) -> Unit) {
     val config by HotspotController.config.collectAsStateWithLifecycle()
     val status by HotspotController.status.collectAsStateWithLifecycle()
     var qrFor by remember { mutableStateOf<Group?>(null) }
-    val canAdd = config.groups.size < Validation.MAX_GROUPS
+    val caps = capabilities()
+    val canAdd = config.groups.size < Validation.MAX_GROUPS && caps.multipleNetworks
 
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(padding),
@@ -68,8 +69,13 @@ fun NetworksTab(padding: PaddingValues, onEditGroup: (String?) -> Unit) {
             Column {
                 SectionHeader("One Wi-Fi name, one password each", actionLabel = if (canAdd) "Add" else null) { onEditGroup(null) }
                 Text(
-                    "Devices joining \"${config.ssid}\" land in the network whose password they used." +
-                        if (canAdd) "" else " You have the maximum of ${Validation.MAX_GROUPS} networks.",
+                    when {
+                        !caps.multipleNetworks -> "With the Shizuku engine there is one network: devices join \"${config.ssid}\" " +
+                            "with ${config.groups.first().name}'s password. The other networks need root."
+                        canAdd -> "Devices joining \"${config.ssid}\" land in the network whose password they used."
+                        else -> "Devices joining \"${config.ssid}\" land in the network whose password they used. " +
+                            "You have the maximum of ${Validation.MAX_GROUPS} networks."
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 4.dp),
@@ -79,6 +85,10 @@ fun NetworksTab(padding: PaddingValues, onEditGroup: (String?) -> Unit) {
         items(config.groups, key = { it.id }) { g ->
             val idx = config.groups.indexOf(g)
             GroupCard(
+                // Shizuku runs the first network only.
+                modifier = Modifier.unavailable(if (idx > 0 && !caps.multipleNetworks) NEEDS_ROOT else null),
+                rootDetails = caps.firewall,
+                isolationShown = caps.deviceIsolation,
                 group = g,
                 color = groupColor(idx),
                 connected = status.clients.count { it.groupId == g.id },
@@ -99,6 +109,10 @@ fun NetworksTab(padding: PaddingValues, onEditGroup: (String?) -> Unit) {
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun GroupCard(
+    modifier: Modifier,
+    /** Addresses, firewall and Tailscale tags apply (root engine). */
+    rootDetails: Boolean,
+    isolationShown: Boolean,
     group: Group,
     color: Color,
     connected: Int,
@@ -109,7 +123,7 @@ private fun GroupCard(
 ) {
     var showPw by remember { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
-    Card(Modifier.fillMaxWidth().clickable(onClick = onEdit)) {
+    Card(modifier.fillMaxWidth().clickable(onClick = onEdit)) {
         Row(Modifier.height(IntrinsicSize.Min)) {
             Box(Modifier.width(6.dp).fillMaxHeight().background(color, RoundedCornerShape(topStart = 12.dp, bottomStart = 12.dp)))
             Column(Modifier.padding(14.dp).weight(1f)) {
@@ -142,20 +156,22 @@ private fun GroupCard(
                     CardIconButton(Icons.Default.Edit, "Edit ${group.name}", onEdit)
                 }
                 Text(
-                    "${group.networkCidr} · gateway ${group.gateway}",
+                    if (rootDetails) "${group.networkCidr} · gateway ${group.gateway}" else "Addresses chosen by Android",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(bottom = 6.dp),
                 )
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Tag(if (group.internet) "Internet" else "No internet")
-                    if (group.tailscale) Tag("Tailscale")
-                    if (group.usesExitNode) Tag("Exit node: ${group.exitNodeName.ifBlank { group.exitNodeIp }}")
-                    if (group.shareSubnet) Tag("Shared with tailnet")
-                    if (reachNames.isNotEmpty()) Tag("Can reach ${reachNames.joinToString(", ")}")
-                    Tag(
+                    if (rootDetails) {
+                        Tag(if (group.internet) "Internet" else "No internet")
+                        if (group.tailscale) Tag("Tailscale")
+                        if (group.usesExitNode) Tag("Exit node: ${group.exitNodeName.ifBlank { group.exitNodeIp }}")
+                        if (group.shareSubnet) Tag("Shared with tailnet")
+                        if (reachNames.isNotEmpty()) Tag("Can reach ${reachNames.joinToString(", ")}")
+                    } else Tag("Internet")
+                    if (isolationShown) Tag(
                         when {
-                            !strictIsolation -> "Not isolated (strict isolation off)"
+                            rootDetails && !strictIsolation -> "Not isolated (strict isolation off)"
                             group.devicesSeeEachOther -> "Devices see each other"
                             else -> "Devices isolated"
                         }

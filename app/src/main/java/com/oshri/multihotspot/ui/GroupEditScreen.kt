@@ -79,6 +79,7 @@ fun GroupEditScreen(groupId: String?, onDone: () -> Unit) {
     var tailscale by remember { mutableStateOf(original.tailscale) }
     var reach by remember { mutableStateOf(original.canReach.toSet()) }
     val status by HotspotController.status.collectAsStateWithLifecycle()
+    val caps = capabilities()
     var dns1 by remember { mutableStateOf(original.dns1) }
     var dns2 by remember { mutableStateOf(original.dns2) }
     var leases by remember { mutableStateOf(config.staticLeases.filter { it.groupId == original.id }) }
@@ -185,65 +186,84 @@ fun GroupEditScreen(groupId: String?, onDone: () -> Unit) {
                 modifier = Modifier.fillMaxWidth(),
             )
 
-            SectionLabel("Addressing")
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(gateway, { gateway = it; syncRange(it, prefix) }, label = { Text("Gateway (phone) IP") }, singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(2f))
-                OutlinedTextField(prefix, { prefix = it.filter(Char::isDigit).take(2); syncRange(gateway, prefix) }, label = { Text("Prefix /") }, singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
-            }
-            val cidr = build().networkCidr
-            if (cidr.isNotEmpty()) Text("Subnet $cidr · mask ${Ipv4.format(Ipv4.mask(prefix.toIntOrNull()?.coerceIn(0, 32) ?: 24))}",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(dhcpStart, { dhcpStart = it }, label = { Text("DHCP from") }, singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f))
-                OutlinedTextField(dhcpEnd, { dhcpEnd = it }, label = { Text("DHCP to") }, singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f))
-            }
-            OutlinedTextField(lease, { lease = it.filter(Char::isDigit).take(3) }, label = { Text("Lease time (hours)") }, singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(dns1, { dns1 = it }, label = { Text("DNS 1") }, singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f))
-                OutlinedTextField(dns2, { dns2 = it }, label = { Text("DNS 2 (optional)") }, singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f))
+            if (!caps.addressing) Text(
+                "With the Shizuku engine, devices use this network's password; Android chooses the addresses. " +
+                    "The settings below that need root are kept for when root is available.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            Gated(caps.addressing) {
+                SectionLabel("Addressing")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(gateway, { gateway = it; syncRange(it, prefix) }, label = { Text("Gateway (phone) IP") }, singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(2f))
+                    OutlinedTextField(prefix, { prefix = it.filter(Char::isDigit).take(2); syncRange(gateway, prefix) }, label = { Text("Prefix /") }, singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
+                }
+                val cidr = build().networkCidr
+                if (cidr.isNotEmpty()) Text("Subnet $cidr · mask ${Ipv4.format(Ipv4.mask(prefix.toIntOrNull()?.coerceIn(0, 32) ?: 24))}",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(dhcpStart, { dhcpStart = it }, label = { Text("DHCP from") }, singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f))
+                    OutlinedTextField(dhcpEnd, { dhcpEnd = it }, label = { Text("DHCP to") }, singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f))
+                }
+                OutlinedTextField(lease, { lease = it.filter(Char::isDigit).take(3) }, label = { Text("Lease time (hours)") }, singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(dns1, { dns1 = it }, label = { Text("DNS 1") }, singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f))
+                    OutlinedTextField(dns2, { dns2 = it }, label = { Text("DNS 2 (optional)") }, singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f))
+                }
             }
 
             SectionLabel("Access")
-            SwitchRow("Internet access", "Off = devices only reach the phone (LAN-only network, e.g. for IoT).", internet) { internet = it }
-            SwitchRow(
-                "Devices can see each other",
-                "Off = every device is isolated from the others in this network (recommended for guests).",
-                seeEachOther,
-            ) { seeEachOther = it }
-            Text(
+            Gated(caps.firewall) {
+                SwitchRow("Internet access", "Off = devices only reach the phone (LAN-only network, e.g. for IoT).", internet) { internet = it }
+            }
+            Gated(caps.deviceIsolation, phoneReason(rootHas = true)) {
+                SwitchRow(
+                    "Devices can see each other",
+                    "Off = every device is isolated from the others in this network (recommended for guests).",
+                    seeEachOther,
+                ) { seeEachOther = it }
+            }
+            if (caps.firewall) Text(
                 if (config.strictIsolation) "Devices in different networks can never reach each other."
                 else "Strict isolation is OFF in Settings: all devices on all passwords can reach each other directly, and this switch has no effect.",
                 style = MaterialTheme.typography.bodySmall,
                 color = if (config.strictIsolation) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
             )
-            SwitchRow(
-                "Access to Tailscale network",
-                "Devices can reach your tailnet (100.x addresses and its subnet routes) through this phone, as if they were the phone. " +
-                    "Requires the Tailscale app on this phone to be signed in and connected.",
-                tailscale,
-            ) { tailscale = it }
-            if (tailscale) {
-                Text(
-                    when {
-                        status.tailscale.isNotBlank() -> "Tailscale is connected on this phone (${status.tailscale})."
-                        else -> "Tailscale isn't connected right now (or the hotspot is off). Open the Tailscale app, sign in and connect."
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                if (dns1 != MAGIC_DNS) TextButton(onClick = { dns2 = if (dns1 != MAGIC_DNS) dns1 else dns2; dns1 = MAGIC_DNS }) {
-                    Text("Use Tailscale DNS (MagicDNS) so tailnet names resolve")
+            Gated(caps.tailscale) {
+                SwitchRow(
+                    "Access to Tailscale network",
+                    "Devices can reach your tailnet (100.x addresses and its subnet routes) through this phone, as if they were the phone. " +
+                        "Requires the Tailscale app on this phone to be signed in and connected.",
+                    tailscale,
+                ) { tailscale = it }
+                if (tailscale) {
+                    Text(
+                        when {
+                            status.tailscale.isNotBlank() -> "Tailscale is connected on this phone (${status.tailscale})."
+                            else -> "Tailscale isn't connected right now (or the hotspot is off). Open the Tailscale app, sign in and connect."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (dns1 != MAGIC_DNS) TextButton(onClick = { dns2 = if (dns1 != MAGIC_DNS) dns1 else dns2; dns1 = MAGIC_DNS }) {
+                        Text("Use Tailscale DNS (MagicDNS) so tailnet names resolve")
+                    }
                 }
             }
 
-            TailscaleSection(
+            // Without root there are no Tailscale instances: don't start (or poll) one, just show the saved choices.
+            if (!caps.tailscale) Gated(false) {
+                SectionLabel("Tailscale exit node and sharing")
+                SwitchRow("Use a Tailscale exit node", "This network's internet goes out through a device in your tailnet.", useExit) {}
+                SwitchRow("Share this network with your tailnet", "Tailnet devices can reach this network's devices.", shareSubnet) {}
+            } else TailscaleSection(
                 groupId = original.id,
                 hostname = build().tailscaleHostname,
                 subnet = build().networkCidr,
@@ -258,49 +278,53 @@ fun GroupEditScreen(groupId: String?, onDone: () -> Unit) {
                 onInstanceUsed = { instanceUsed = true },
             )
 
-            SectionLabel("Access to other networks")
-            val others = config.groups.filter { it.id != original.id }
-            if (others.isEmpty()) {
-                Text("Add another network to allow access between them.",
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            } else {
-                Text(
-                    "Devices in this network can open connections to devices in the selected networks " +
-                        "(e.g. Home -> IoT to control smart devices). One-way: those devices can only answer, " +
-                        "not start connections back, unless you allow it in their settings too.",
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    others.forEach { o ->
-                        FilterChip(
-                            selected = o.id in reach,
-                            onClick = { reach = if (o.id in reach) reach - o.id else reach + o.id },
-                            label = { Text("${o.name} · ${o.networkCidr}") },
-                        )
+            Gated(caps.firewall) {
+                SectionLabel("Access to other networks")
+                val others = config.groups.filter { it.id != original.id }
+                if (others.isEmpty()) {
+                    Text("Add another network to allow access between them.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else {
+                    Text(
+                        "Devices in this network can open connections to devices in the selected networks " +
+                            "(e.g. Home -> IoT to control smart devices). One-way: those devices can only answer, " +
+                            "not start connections back, unless you allow it in their settings too.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        others.forEach { o ->
+                            FilterChip(
+                                selected = o.id in reach,
+                                onClick = { reach = if (o.id in reach) reach - o.id else reach + o.id },
+                                label = { Text("${o.name} · ${o.networkCidr}") },
+                            )
+                        }
                     }
+                    val back = others.filter { original.id in it.canReach }.map { it.name }
+                    if (back.isNotEmpty()) Text(
+                        "Can be reached from: ${back.joinToString(", ")}",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
-                val back = others.filter { original.id in it.canReach }.map { it.name }
-                if (back.isNotEmpty()) Text(
-                    "Can be reached from: ${back.joinToString(", ")}",
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
             }
 
-            SectionLabel("Fixed IPs in this network")
-            if (leases.isEmpty()) Text("None. You can also add one from the Status or Fixed IPs tab.",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            leases.forEach { l ->
-                Card(Modifier.fillMaxWidth()) {
-                    Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text(l.ip, style = MaterialTheme.typography.titleSmall)
-                            Text(listOf(l.label, l.mac).filter { it.isNotBlank() }.joinToString(" · "), style = MaterialTheme.typography.bodySmall)
+            Gated(caps.fixedIps) {
+                SectionLabel("Fixed IPs in this network")
+                if (leases.isEmpty()) Text("None. You can also add one from the Status or Fixed IPs tab.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                leases.forEach { l ->
+                    Card(Modifier.fillMaxWidth()) {
+                        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text(l.ip, style = MaterialTheme.typography.titleSmall)
+                                Text(listOf(l.label, l.mac).filter { it.isNotBlank() }.joinToString(" · "), style = MaterialTheme.typography.bodySmall)
+                            }
+                            IconButton(onClick = { leases = leases - l }) { Icon(Icons.Default.Delete, "Remove fixed IP") }
                         }
-                        IconButton(onClick = { leases = leases - l }) { Icon(Icons.Default.Delete, "Remove fixed IP") }
                     }
                 }
+                OutlinedButton(onClick = { addLease = true }) { Text("Add fixed IP") }
             }
-            OutlinedButton(onClick = { addLease = true }) { Text("Add fixed IP") }
 
             HorizontalDivider(Modifier.padding(vertical = 8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

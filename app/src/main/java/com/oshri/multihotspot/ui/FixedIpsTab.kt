@@ -66,6 +66,9 @@ fun FixedIpsTab(padding: PaddingValues) {
     val scope = rememberCoroutineScope()
     var leaseEdit by remember { mutableStateOf<LeaseEdit?>(null) }
     var blocking by remember { mutableStateOf(false) }
+    val caps = capabilities()
+    val leaseReason = if (caps.fixedIps) null else NEEDS_ROOT
+    val blockReason = if (caps.blocking) null else phoneReason(rootHas = true)
 
     val order = config.groups.map { it.id }
     // Network order, then address; leases of deleted networks last (Validation reports them).
@@ -101,9 +104,10 @@ fun FixedIpsTab(padding: PaddingValues) {
     ) {
         item {
             Column {
-                SectionHeader("Fixed IPs (${leases.size})", actionLabel = "Add") {
+                SectionHeader("Fixed IPs (${leases.size})", actionLabel = if (caps.fixedIps) "Add" else null) {
                     leaseEdit = LeaseEdit(StaticLease("", config.groups.firstOrNull()?.id ?: "", "", ""), editing = null)
                 }
+                leaseReason?.let { UnavailableNote(it, Modifier.padding(top = 4.dp)) }
                 Hint("A device with a fixed IP always gets the same address in its network. Phones use a different random MAC " +
                     "for each Wi-Fi name, so pick the device from the connected list after it joins once.")
             }
@@ -113,6 +117,7 @@ fun FixedIpsTab(padding: PaddingValues) {
         items(leases) { l ->
             val idx = order.indexOf(l.groupId)
             LeaseRow(
+                modifier = Modifier.unavailable(leaseReason),
                 lease = l,
                 networkName = config.group(l.groupId)?.name ?: "deleted network",
                 color = if (idx < 0) MaterialTheme.colorScheme.error else groupColor(idx),
@@ -127,13 +132,14 @@ fun FixedIpsTab(padding: PaddingValues) {
 
         item {
             Column(Modifier.padding(top = 8.dp)) {
-                SectionHeader("Blocked devices (${config.blockedMacs.size})", actionLabel = "Block") { blocking = true }
+                SectionHeader("Blocked devices (${config.blockedMacs.size})", actionLabel = if (caps.blocking) "Block" else null) { blocking = true }
+                blockReason?.let { UnavailableNote(it, Modifier.padding(top = 4.dp)) }
                 Hint("Blocked devices can't join any of your networks, whatever password they use.")
             }
         }
         if (config.blockedMacs.isEmpty()) item { Hint("None.") }
         items(config.blockedMacs) { m ->
-            Card(Modifier.fillMaxWidth()) {
+            Card(Modifier.unavailable(blockReason).fillMaxWidth()) {
                 Row(Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         nameOf(m)?.let { Text(it, style = MaterialTheme.typography.titleSmall) }
@@ -184,8 +190,8 @@ private fun Hint(text: String) {
 }
 
 @Composable
-private fun LeaseRow(lease: StaticLease, networkName: String, color: Color, onlineNote: String?, onEdit: () -> Unit, onRemove: () -> Unit) {
-    Card(Modifier.fillMaxWidth()) {
+private fun LeaseRow(modifier: Modifier, lease: StaticLease, networkName: String, color: Color, onlineNote: String?, onEdit: () -> Unit, onRemove: () -> Unit) {
+    Card(modifier.fillMaxWidth()) {
         Row(Modifier.padding(start = 16.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(10.dp).background(color, CircleShape))
             Spacer(Modifier.width(12.dp))

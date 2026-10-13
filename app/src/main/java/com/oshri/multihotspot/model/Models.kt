@@ -81,6 +81,10 @@ data class HotspotConfig(
     val groups: List<Group>,
     val staticLeases: List<StaticLease> = emptyList(),
     val blockedMacs: List<String> = emptyList(),
+    /** 5 GHz instead of 2.4 GHz (Shizuku engine only: the phone's own hotspot). */
+    val band5: Boolean = false,
+    /** 5 GHz channel, 0 = let the phone choose. */
+    val channel5: Int = 0,
 ) {
     fun group(id: String): Group? = groups.firstOrNull { it.id == id }
 
@@ -92,6 +96,8 @@ data class HotspotConfig(
 
     companion object {
         val CHANNELS_24GHZ = (1..13).toList()
+        /** Non-DFS 5 GHz channels (DFS channels make the hotspot wait for radar checks or move). */
+        val CHANNELS_5GHZ = listOf(36, 40, 44, 48, 149, 153, 157, 161, 165)
 
         fun default(): HotspotConfig = HotspotConfig(
             ssid = "S10-Hotspot",
@@ -115,9 +121,24 @@ data class HotspotConfig(
     }
 }
 
-/** Order-insensitive form, so re-saving the same settings doesn't look like a change. */
+/** Order-insensitive form, so re-saving the same settings doesn't look like a change. 5 GHz is Shizuku-only. */
 fun HotspotConfig.normalized(): HotspotConfig = copy(
     staticLeases = staticLeases.sortedWith(compareBy({ it.groupId }, { it.mac })),
+    blockedMacs = blockedMacs.map { it.lowercase() }.sorted(),
+    band5 = false, channel5 = 0,
+)
+
+/**
+ * The part of the config the Shizuku engine uses: Wi-Fi name, the first network's password and isolation, radio
+ * settings, block list. Changes elsewhere don't need Apply there.
+ */
+fun HotspotConfig.shizukuView(): HotspotConfig = copy(
+    groups = groups.take(1).map { g ->
+        Group(id = g.id, name = "", password = g.password, gateway = "", prefix = 0, dhcpStart = "", dhcpEnd = "",
+            devicesSeeEachOther = g.devicesSeeEachOther)
+    },
+    staticLeases = emptyList(), bssid = "", iface = "", wifiMode = WifiMode.KEEP, strictIsolation = true,
+    channel = if (band5) 0 else channel, channel5 = if (band5) channel5 else 0,
     blockedMacs = blockedMacs.map { it.lowercase() }.sorted(),
 )
 
@@ -188,6 +209,12 @@ data class EngineStatus(
     val exits: List<ExitStatus> = emptyList(),
     /** Per group shared with the tailnet: whether its subnet route is approved. */
     val subnets: List<SubnetStatus> = emptyList(),
+    /** Frequency the hotspot runs on (MHz; Shizuku engine only, 0 = unknown). */
+    val frequencyMhz: Int = 0,
+    /** What the phone's own hotspot supports (Shizuku engine only; null with root). */
+    val phoneHotspot: PhoneHotspotSupport? = null,
+    /** [ShizukuConfigPrint] of the phone hotspot's live settings (Shizuku engine only). */
+    val liveConfigPrint: String = "",
 ) {
     fun exit(groupId: String): ExitStatus? = exits.firstOrNull { it.groupId == groupId }
     fun subnet(groupId: String): SubnetStatus? = subnets.firstOrNull { it.groupId == groupId }
@@ -256,6 +283,14 @@ data class EngineStatus(
                             "DHCP" -> s.copy(dhcpAlive = v == "1")
                             "DAEMON" -> s.copy(daemonAlive = v == "1")
                             "TSBIN" -> s.copy(tailscaleVersion = v)
+                            "FREQ" -> s.copy(frequencyMhz = v.toIntOrNull() ?: 0)
+                            "SHZ_CONF" -> s.copy(liveConfigPrint = v)
+                            "SHZ_MAXCLIENTS" -> s.copy(phoneHotspot = (s.phoneHotspot ?: PhoneHotspotSupport()).copy(maxClients = v == "1"))
+                            "SHZ_BLOCK" -> s.copy(phoneHotspot = (s.phoneHotspot ?: PhoneHotspotSupport()).copy(blocking = v == "1"))
+                            "SHZ_ISOLATION" -> s.copy(phoneHotspot = (s.phoneHotspot ?: PhoneHotspotSupport()).copy(isolation = v == "1"))
+                            "SHZ_SAMSUNG" -> s.copy(phoneHotspot = (s.phoneHotspot ?: PhoneHotspotSupport()).copy(samsung = v == "1"))
+                            "SHZ_5GHZ" -> s.copy(phoneHotspot = (s.phoneHotspot ?: PhoneHotspotSupport())
+                                .copy(channels5 = v.split(',').mapNotNull { it.trim().toIntOrNull() }))
                             else -> s
                         }
                     }
@@ -265,6 +300,32 @@ data class EngineStatus(
         }
     }
 }
+
+/** What the phone's own hotspot can do (reported by the Shizuku engine). */
+/**
+ * Fingerprint of the phone hotspot's name, password and hidden flag: the Shizuku service reports it for the live
+ * settings, the app computes it for the config it applied. Different = the hotspot no longer runs SegAP's settings.
+ */
+object ShizukuConfigPrint {
+    fun of(ssid: String?, passphrase: String?, hidden: Boolean): String {
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        val bytes = md.digest("${ssid ?: ""}\u0000${passphrase ?: ""}\u0000$hidden".toByteArray())
+        return bytes.take(8).joinToString("") { "%02x".format(it) }
+    }
+
+    fun of(c: HotspotConfig): String = of(c.ssid, c.groups.firstOrNull()?.password, c.hidden)
+}
+
+data class PhoneHotspotSupport(
+    val maxClients: Boolean = false,
+    /** Android's block list (needs the driver's "client force disconnect"). */
+    val blocking: Boolean = false,
+    /** Devices on the hotspot can't reach each other. */
+    val isolation: Boolean = false,
+    val samsung: Boolean = false,
+    /** 5 GHz channels allowed for a hotspot here (empty = none or unknown). */
+    val channels5: List<Int> = emptyList(),
+)
 
 /** Engine's view of one group shared with the tailnet (as of its watchdog's last pass). */
 data class SubnetStatus(
