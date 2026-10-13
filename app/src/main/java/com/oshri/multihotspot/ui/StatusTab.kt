@@ -1,14 +1,10 @@
 package com.oshri.multihotspot.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.IntrinsicSize
-import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -17,7 +13,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -27,15 +22,8 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Block
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Description
-import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PushPin
-import androidx.compose.material.icons.filled.QrCode2
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Visibility
-import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.WifiTethering
 import androidx.compose.material.icons.filled.WifiTetheringOff
 import androidx.compose.material3.AlertDialog
@@ -44,20 +32,15 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -67,28 +50,22 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.oshri.multihotspot.HotspotController
-import com.oshri.multihotspot.R
 import com.oshri.multihotspot.model.Client
 import com.oshri.multihotspot.model.EngineState
-import com.oshri.multihotspot.model.Group
-import com.oshri.multihotspot.model.Ipv4
 import com.oshri.multihotspot.model.StaticLease
 import com.oshri.multihotspot.model.Validation
 import com.oshri.multihotspot.model.normalized
 import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+/** Tab 1: hotspot on/off, problems, connected devices. */
 @Composable
-fun HomeScreen(onSettings: () -> Unit, onLog: () -> Unit, onEditGroup: (String?) -> Unit) {
+fun StatusTab(padding: PaddingValues) {
     val config by HotspotController.config.collectAsStateWithLifecycle()
     val applied by HotspotController.applied.collectAsStateWithLifecycle()
     val status by HotspotController.status.collectAsStateWithLifecycle()
@@ -96,145 +73,177 @@ fun HomeScreen(onSettings: () -> Unit, onLog: () -> Unit, onEditGroup: (String?)
     val error by HotspotController.error.collectAsStateWithLifecycle()
     val root by HotspotController.rootAvailable.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
-    val snackbar = remember { SnackbarHostState() }
+    val snackbar = LocalSnackbar.current
     val problems = remember(config) { Validation.config(config) }
 
     var fixedIpFor by remember { mutableStateOf<Client?>(null) }
-    var qrFor by remember { mutableStateOf<Group?>(null) }
     var blockFor by remember { mutableStateOf<Client?>(null) }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.app_name)) },
-                actions = {
-                    IconButton(onClick = onLog) { Icon(Icons.Default.Description, contentDescription = "Log") }
-                    IconButton(onClick = onSettings) { Icon(Icons.Default.Settings, contentDescription = "Settings") }
-                },
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().padding(padding),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        if (root == false) item {
+            MessageCard(
+                title = "No root access",
+                text = "SegAP needs root. On this phone Magisk only loads when booting through recovery: " +
+                    "run `adb reboot recovery` (or use the Magisk key combo), then allow root for SegAP.",
+                error = true,
             )
-        },
-        snackbarHost = { SnackbarHost(snackbar) },
-    ) { padding ->
-        LazyColumn(
-            modifier = Modifier.fillMaxSize().padding(padding),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            if (root == false) item {
-                MessageCard(
-                    title = "No root access",
-                    text = "SegAP needs root. On this phone Magisk only loads when booting through recovery: " +
-                        "run `adb reboot recovery` (or use the Magisk key combo), then allow root for SegAP.",
-                    error = true,
-                )
-            }
-
-            item {
-                StatusCard(
-                    state = status.state,
-                    reason = status.reason,
-                    ssid = config.ssid,
-                    channel = config.channel,
-                    upstream = status.upstream,
-                    devices = status.clients.size,
-                    busy = busy,
-                    // applied == null while running: started outside the app (or app data cleared) - offer to apply ours.
-                    pendingChanges = status.state == EngineState.RUNNING && applied?.normalized() != config.normalized(),
-                    canStart = problems.isEmpty() && root != false,
-                    // Something may still be up after a failure: always allow cleaning up.
-                    canStop = status.state == EngineState.RUNNING || status.hostapdAlive || status.dhcpAlive || status.daemonAlive,
-                    tailscaleWanted = config.groups.any { it.tailscale },
-                    tailscaleIface = status.tailscale,
-                    onStart = { HotspotController.startAsync() },
-                    onStop = { HotspotController.stopAsync() },
-                )
-            }
-
-            error?.let { e ->
-                item {
-                    MessageCard(title = "Problem", text = e, error = true, onDismiss = { HotspotController.clearError() })
-                }
-            }
-            if (problems.isNotEmpty()) item {
-                MessageCard(title = "Fix before starting", text = problems.joinToString("\n") { "• $it" }, error = true)
-            }
-
-            item {
-                SectionHeader("Networks · one name, one password each", actionLabel = "Add") {
-                    if (config.groups.size < Validation.MAX_GROUPS) onEditGroup(null)
-                }
-            }
-            items(config.groups, key = { it.id }) { g ->
-                val idx = config.groups.indexOf(g)
-                GroupCard(
-                    group = g,
-                    color = groupColor(idx),
-                    connected = status.clients.count { it.groupId == g.id },
-                    strictIsolation = config.strictIsolation,
-                    reachNames = g.canReach.mapNotNull { id -> config.group(id)?.name },
-                    onEdit = { onEditGroup(g.id) },
-                    onQr = { qrFor = g },
-                )
-            }
-
-            item { SectionHeader("Connected devices (${status.clients.size})") }
-            if (status.clients.isEmpty()) item {
-                Text(
-                    if (status.state == EngineState.RUNNING) "No devices connected yet." else "Start the hotspot to see devices.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 4.dp),
-                )
-            }
-            items(status.clients, key = { it.mac }) { c ->
-                val idx = config.groups.indexOfFirst { it.id == c.groupId }
-                ClientRow(
-                    client = c,
-                    groupName = config.group(c.groupId)?.name ?: c.groupId,
-                    color = groupColor(idx),
-                    hasFixedIp = config.staticLeases.any { it.mac.equals(c.mac, ignoreCase = true) },
-                    onFixedIp = { fixedIpFor = c },
-                    onBlock = { blockFor = c },
-                )
-            }
-            item { Spacer(Modifier.height(24.dp)) }
         }
+
+        item {
+            StatusCard(
+                state = status.state,
+                reason = status.reason,
+                ssid = config.ssid,
+                channel = config.channel,
+                upstream = status.upstream,
+                devices = status.clients.size,
+                busy = busy,
+                // applied == null while running: started outside the app (or app data cleared) - offer to apply ours.
+                pendingChanges = status.state == EngineState.RUNNING && applied?.normalized() != config.normalized(),
+                canStart = problems.isEmpty() && root != false,
+                // Something may still be up after a failure: always allow cleaning up.
+                canStop = status.state == EngineState.RUNNING || status.hostapdAlive || status.dhcpAlive || status.daemonAlive,
+                tailscaleWanted = config.groups.any { it.tailscale },
+                tailscaleIface = status.tailscale,
+                exits = status.exits.map { e ->
+                    val g = config.group(e.groupId)
+                    val name = g?.name ?: e.groupId
+                    val node = g?.takeIf { it.exitNodeIp == e.nodeIp }?.exitNodeName?.ifBlank { null } ?: e.nodeIp
+                    when {
+                        e.active -> "$name: internet via exit node $node" to true
+                        e.backendState == "NeedsLogin" ->
+                            "$name: Tailscale sign-in needed (edit the network) - normal internet for now" to false
+                        e.backendState == "NeedsMachineAuth" ->
+                            "$name: approve ${g?.tailscaleHostname ?: "its device"} in the Tailscale admin console - normal internet for now" to false
+                        e.backendState == "Running" -> "$name: exit node $node unreachable - normal internet for now" to false
+                        else -> "$name: connecting to Tailscale - normal internet for now" to false
+                    }
+                } + status.subnets.map { sn ->
+                    val g = config.group(sn.groupId)
+                    val name = g?.name ?: sn.groupId
+                    when {
+                        sn.approved -> "$name: shared with your tailnet (${sn.subnet})" to true
+                        sn.backendState == "NeedsLogin" -> "$name: Tailscale sign-in needed to share ${sn.subnet} (edit the network)" to false
+                        sn.backendState == "NeedsMachineAuth" ->
+                            "$name: approve ${g?.tailscaleHostname ?: "its device"} in the Tailscale admin console to share ${sn.subnet}" to false
+                        sn.backendState == "Running" ->
+                            "$name: approve ${sn.subnet} for ${g?.tailscaleHostname ?: "its device"} in the Tailscale admin console" to false
+                        else -> "$name: connecting to Tailscale to share ${sn.subnet}" to false
+                    }
+                },
+                onStart = { HotspotController.startAsync() },
+                onStop = { HotspotController.stopAsync() },
+            )
+        }
+
+        error?.let { e ->
+            item {
+                MessageCard(title = "Problem", text = e, error = true, onDismiss = { HotspotController.clearError() })
+            }
+        }
+        if (problems.isNotEmpty()) item {
+            MessageCard(title = "Fix before starting", text = problems.joinToString("\n") { "• $it" }, error = true)
+        }
+
+        item { SectionHeader("Connected devices (${status.clients.size})") }
+        if (status.clients.isEmpty()) item {
+            Text(
+                if (status.state == EngineState.RUNNING) "No devices connected yet." else "Start the hotspot to see devices.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 4.dp),
+            )
+        }
+        items(status.clients, key = { it.mac }) { c ->
+            val idx = config.groups.indexOfFirst { it.id == c.groupId }
+            ClientRow(
+                client = c,
+                groupName = config.group(c.groupId)?.name ?: c.groupId,
+                color = groupColor(idx),
+                // Only a fixed IP in the network it joined applies to it.
+                hasFixedIp = config.staticLeases.any { it.mac.equals(c.mac, ignoreCase = true) && it.groupId == c.groupId },
+                onFixedIp = { fixedIpFor = c },
+                onBlock = { blockFor = c },
+            )
+        }
+        item { Spacer(Modifier.height(8.dp)) }
     }
 
     fixedIpFor?.let { c ->
-        val group = config.group(c.groupId)
         val existing = config.staticLeases.firstOrNull { it.mac.equals(c.mac, ignoreCase = true) }
         FixedIpDialog(
-            mac = c.mac,
-            group = group,
-            initialIp = existing?.ip ?: c.ip ?: "",
-            initialLabel = existing?.label ?: (c.hostname ?: ""),
+            config = config,
+            clients = status.clients,
+            // The device's network is the password it joined with now. A fixed IP it has in another network moves
+            // here (one per device), starting from the address it has now - the old one can't fit this subnet.
+            start = existing?.let { if (it.groupId == c.groupId) it else StaticLease(it.mac, c.groupId, c.ip ?: "", it.label) }
+                ?: StaticLease(c.mac, c.groupId, c.ip ?: "", c.hostname ?: ""),
+            editing = existing,
+            lockDevice = true,
             onDismiss = { fixedIpFor = null },
-            onSave = { ip, label ->
-                val others = config.staticLeases.filterNot { it.mac.equals(c.mac, ignoreCase = true) }
-                HotspotController.updateConfig(config.copy(staticLeases = others + StaticLease(c.mac, c.groupId, ip, label)))
+            onSave = { lease ->
+                HotspotController.updateConfig(config.copy(staticLeases = config.staticLeases.filterNot { it == existing } + lease))
                 fixedIpFor = null
-                scope.launch { snackbar.showSnackbar("Fixed IP saved - tap Apply changes") }
+                scope.launch { snackbar.showSnackbar(savedMessage("Fixed IP saved", status.state)) }
             },
         )
-    }
-    qrFor?.let { g ->
-        WifiQrDialog(ssid = config.ssid, networkName = g.name, password = g.password, hidden = config.hidden, onDismiss = { qrFor = null })
     }
     blockFor?.let { c ->
         AlertDialog(
             onDismissRequest = { blockFor = null },
             title = { Text("Block ${c.hostname ?: c.mac}?") },
-            text = { Text("The device won't be able to join any of your networks. Applies when the hotspot restarts (Apply changes). You can unblock it in Settings.") },
+            text = { Text("The device won't be able to join any of your networks. Applies when the hotspot restarts (Apply changes). You can unblock it in the Fixed IPs tab.") },
             confirmButton = {
                 TextButton(onClick = {
                     HotspotController.updateConfig(config.copy(blockedMacs = (config.blockedMacs + c.mac).distinct()))
                     blockFor = null
-                    scope.launch { snackbar.showSnackbar("Blocked - tap Apply changes") }
+                    scope.launch { snackbar.showSnackbar(savedMessage("Blocked", status.state)) }
                 }) { Text("Block") }
             },
             dismissButton = { TextButton(onClick = { blockFor = null }) { Text("Cancel") } },
         )
+    }
+}
+
+/** Snackbar text after a settings change: while the hotspot runs, changes wait for Apply. */
+fun savedMessage(what: String, state: EngineState): String =
+    if (state == EngineState.RUNNING) "$what - tap Apply changes" else what
+
+/**
+ * Shown under the title of the other tabs while the running hotspot uses older settings than the saved ones.
+ */
+@Composable
+fun PendingChangesBar() {
+    val config by HotspotController.config.collectAsStateWithLifecycle()
+    val applied by HotspotController.applied.collectAsStateWithLifecycle()
+    val status by HotspotController.status.collectAsStateWithLifecycle()
+    val busy by HotspotController.busy.collectAsStateWithLifecycle()
+    val root by HotspotController.rootAvailable.collectAsStateWithLifecycle()
+    val pending = status.state == EngineState.RUNNING && applied?.normalized() != config.normalized()
+    if (!pending && busy == null) return
+    val problems = remember(config) { Validation.config(config) }
+    Surface(color = MaterialTheme.colorScheme.tertiaryContainer, contentColor = MaterialTheme.colorScheme.onTertiaryContainer) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    when {
+                        busy != null -> busy!!
+                        problems.isNotEmpty() -> "Settings changed, but some need fixing first (see Status)."
+                        else -> "Settings changed. Applying restarts the hotspot."
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f),
+                )
+                if (busy == null && problems.isEmpty() && root != false) {
+                    Button(onClick = { HotspotController.startAsync() }) { Text("Apply changes") }
+                }
+            }
+            if (busy != null) LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 4.dp))
+        }
     }
 }
 
@@ -252,6 +261,8 @@ private fun StatusCard(
     canStop: Boolean,
     tailscaleWanted: Boolean,
     tailscaleIface: String,
+    /** One line per network using its own Tailscale instance (exit node, shared subnet), and whether all is well. */
+    exits: List<Pair<String, Boolean>>,
     onStart: () -> Unit,
     onStop: () -> Unit,
 ) {
@@ -293,6 +304,13 @@ private fun StatusCard(
                         style = MaterialTheme.typography.bodyMedium,
                         color = if (tailscaleIface.isNotBlank()) Color.Unspecified else MaterialTheme.colorScheme.error,
                     )
+                    if (running) exits.forEach { (text, ok) ->
+                        Text(
+                            text,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (ok) Color.Unspecified else MaterialTheme.colorScheme.error,
+                        )
+                    }
                     if (state == EngineState.FAILED && reason.isNotBlank()) Text(
                         reason,
                         style = MaterialTheme.typography.bodyMedium,
@@ -322,83 +340,6 @@ private fun StatusCard(
                 modifier = Modifier.padding(top = 8.dp),
             )
         }
-    }
-}
-
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun GroupCard(
-    group: Group,
-    color: Color,
-    connected: Int,
-    strictIsolation: Boolean,
-    reachNames: List<String>,
-    onEdit: () -> Unit,
-    onQr: () -> Unit,
-) {
-    var showPw by remember { mutableStateOf(false) }
-    val clipboard = LocalClipboardManager.current
-    Card(Modifier.fillMaxWidth().clickable(onClick = onEdit)) {
-        Row(Modifier.height(IntrinsicSize.Min)) {
-            Box(Modifier.width(6.dp).fillMaxHeight().background(color, RoundedCornerShape(topStart = 12.dp, bottomStart = 12.dp)))
-            Column(Modifier.padding(14.dp).weight(1f)) {
-                // Title row: name, password, then show / QR / copy, then edit.
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        group.name,
-                        style = MaterialTheme.typography.titleMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        // Not weighted: the password takes all remaining space, so the buttons sit at the right edge.
-                        modifier = Modifier.widthIn(max = 140.dp),
-                    )
-                    Spacer(Modifier.width(10.dp))
-                    Text(
-                        if (showPw) group.password else "•".repeat(8),
-                        fontFamily = FontFamily.Monospace,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
-                    )
-                    CardIconButton(
-                        if (showPw) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                        if (showPw) "Hide password" else "Show password",
-                    ) { showPw = !showPw }
-                    CardIconButton(Icons.Default.QrCode2, "Show QR code for ${group.name}", onQr)
-                    CardIconButton(Icons.Default.ContentCopy, "Copy password") { clipboard.setText(AnnotatedString(group.password)) }
-                    CardIconButton(Icons.Default.Edit, "Edit ${group.name}", onEdit)
-                }
-                Text(
-                    "${group.networkCidr} · gateway ${group.gateway}",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(bottom = 6.dp),
-                )
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Tag(if (group.internet) "Internet" else "No internet")
-                    if (group.tailscale) Tag("Tailscale")
-                    if (reachNames.isNotEmpty()) Tag("Can reach ${reachNames.joinToString(", ")}")
-                    Tag(
-                        when {
-                            !strictIsolation -> "Not isolated (strict isolation off)"
-                            group.devicesSeeEachOther -> "Devices see each other"
-                            else -> "Devices isolated"
-                        }
-                    )
-                    if (connected > 0) Tag("$connected online")
-                }
-            }
-        }
-    }
-}
-
-/** Compact icon button so four fit next to the name and password on a phone-width card. */
-@Composable
-private fun CardIconButton(icon: androidx.compose.ui.graphics.vector.ImageVector, description: String, onClick: () -> Unit) {
-    IconButton(onClick = onClick, modifier = Modifier.size(40.dp)) {
-        Icon(icon, contentDescription = description, modifier = Modifier.size(20.dp))
     }
 }
 
@@ -492,40 +433,6 @@ private fun RateText(icon: androidx.compose.ui.graphics.vector.ImageVector, labe
             modifier = Modifier.padding(start = 2.dp),
         )
     }
-}
-
-@Composable
-private fun FixedIpDialog(
-    mac: String,
-    group: Group?,
-    initialIp: String,
-    initialLabel: String,
-    onDismiss: () -> Unit,
-    onSave: (ip: String, label: String) -> Unit,
-) {
-    var ip by remember { mutableStateOf(initialIp) }
-    var label by remember { mutableStateOf(initialLabel) }
-    val err = when {
-        group == null -> "This device's network no longer exists"
-        Ipv4.parse(ip) == null -> "Not a valid IPv4 address"
-        !Ipv4.inSubnet(Ipv4.parse(ip)!!, Ipv4.parse(group.gateway) ?: 0, group.prefix) -> "Must be inside ${group.networkCidr}"
-        ip == group.gateway -> "That's the gateway address"
-        else -> null
-    }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Fixed IP") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("$mac always gets this address in ${group?.name ?: "?"}.", style = MaterialTheme.typography.bodyMedium)
-                OutlinedTextField(value = ip, onValueChange = { ip = it.trim() }, label = { Text("IP address") }, isError = err != null, singleLine = true,
-                    supportingText = { err?.let { Text(it) } })
-                OutlinedTextField(value = label, onValueChange = { label = it }, label = { Text("Label (optional)") }, singleLine = true)
-            }
-        },
-        confirmButton = { TextButton(onClick = { onSave(ip, label) }, enabled = err == null) { Text("Save") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
-    )
 }
 
 @Composable

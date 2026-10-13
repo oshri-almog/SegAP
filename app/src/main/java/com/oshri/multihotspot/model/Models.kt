@@ -21,7 +21,34 @@ data class Group(
     val tailscale: Boolean = false,
     /** Ids of other groups whose devices this group may open connections to (one-way; replies are allowed). */
     val canReach: List<String> = emptyList(),
+    /**
+     * Tailscale exit node (its 100.x address) this group's internet goes out through, via a Tailscale instance
+     * SegAP runs for this group alone. Empty = normal internet. While the node is unreachable the group uses
+     * the normal internet connection.
+     */
+    val exitNodeIp: String = "",
+    /** How Tailscale names [exitNodeIp], for display only. */
+    val exitNodeName: String = "",
+    /**
+     * Share this group with the tailnet: its Tailscale instance advertises the group's subnet as a subnet route,
+     * so tailnet devices reach this group's devices (once the route is approved in the tailnet).
+     */
+    val shareSubnet: Boolean = false,
 ) {
+    val usesExitNode: Boolean get() = exitNodeIp.isNotBlank()
+
+    /** SegAP runs a Tailscale instance for this group (exit node and/or shared subnet). */
+    val hasTailscaleInstance: Boolean get() = usesExitNode || shareSubnet
+
+    /** Device name of this group's Tailscale instance in the tailnet: "segap-" + the network's name. */
+    val tailscaleHostname: String
+        get() {
+            // Trim after truncating: a DNS label can't end with '-'.
+            val slug = name.lowercase().map { if (it in 'a'..'z' || it in '0'..'9') it else '-' }.joinToString("")
+                .replace(Regex("-+"), "-").trim('-').take(50).trim('-')
+            return "segap-" + slug.ifEmpty { id }
+        }
+
     val networkCidr: String
         get() {
             val gw = Ipv4.parse(gateway) ?: return ""
@@ -155,12 +182,23 @@ data class EngineStatus(
     val daemonAlive: Boolean = false,
     val clients: List<Client> = emptyList(),
     val log: List<String> = emptyList(),
+    /** Version of SegAP's own Tailscale binaries on the phone (empty = not installed). */
+    val tailscaleVersion: String = "",
+    /** Per group using an exit node: whether its traffic currently goes through it. */
+    val exits: List<ExitStatus> = emptyList(),
+    /** Per group shared with the tailnet: whether its subnet route is approved. */
+    val subnets: List<SubnetStatus> = emptyList(),
 ) {
+    fun exit(groupId: String): ExitStatus? = exits.firstOrNull { it.groupId == groupId }
+    fun subnet(groupId: String): SubnetStatus? = subnets.firstOrNull { it.groupId == groupId }
+
     companion object {
         fun parse(output: String): EngineStatus {
             var s = EngineStatus()
             val clients = mutableListOf<Client>()
             val log = mutableListOf<String>()
+            val exits = mutableListOf<ExitStatus>()
+            val subnets = mutableListOf<SubnetStatus>()
             var inLog = false
             for (raw in output.lineSequence()) {
                 val line = raw.trimEnd()
@@ -183,6 +221,22 @@ data class EngineStatus(
                             linkUpKbps = opt(10)?.toLongOrNull(),
                         )
                     }
+                    line.startsWith("EXIT ") -> {
+                        // EXIT <group> <active|fallback> <tailscale backend state|-> <exit node ip>
+                        val p = line.split(" ")
+                        if (p.size >= 5) exits += ExitStatus(
+                            groupId = p[1], active = p[2] == "active",
+                            backendState = p[3].takeIf { it != "-" } ?: "", nodeIp = p[4],
+                        )
+                    }
+                    line.startsWith("SUBNET ") -> {
+                        // SUBNET <group> <subnet> <approved 0|1> <tailscale backend state|->
+                        val p = line.split(" ")
+                        if (p.size >= 5) subnets += SubnetStatus(
+                            groupId = p[1], subnet = p[2], approved = p[3] == "1",
+                            backendState = p[4].takeIf { it != "-" } ?: "",
+                        )
+                    }
                     line.contains('=') -> {
                         val (k, v) = line.split('=', limit = 2)
                         s = when (k) {
@@ -201,12 +255,111 @@ data class EngineStatus(
                             "HOSTAPD" -> s.copy(hostapdAlive = v == "1")
                             "DHCP" -> s.copy(dhcpAlive = v == "1")
                             "DAEMON" -> s.copy(daemonAlive = v == "1")
+                            "TSBIN" -> s.copy(tailscaleVersion = v)
                             else -> s
                         }
                     }
                 }
             }
-            return s.copy(clients = clients, log = log)
+            return s.copy(clients = clients, log = log, exits = exits, subnets = subnets)
+        }
+    }
+}
+
+/** Engine's view of one group shared with the tailnet (as of its watchdog's last pass). */
+data class SubnetStatus(
+    val groupId: String,
+    val subnet: String,
+    /** The tailnet approved the route and this instance serves it. */
+    val approved: Boolean,
+    val backendState: String,
+)
+
+/** Engine's view of one exit-node group (as of its watchdog's last pass, every few seconds). */
+data class ExitStatus(
+    val groupId: String,
+    /** The group's internet goes through the exit node right now (else: normal internet). */
+    val active: Boolean,
+    /** Tailscale state of the group's instance: Running, NeedsLogin, Starting, down... */
+    val backendState: String,
+    val nodeIp: String,
+)
+
+/** A device in the tailnet that offers itself as exit node. */
+data class ExitNodeOption(val name: String, val ip: String, val online: Boolean, val os: String)
+
+/** State of one group's Tailscale instance, from "mh_engine.sh ts-status". */
+data class TailscaleInstance(
+    /** Tailscale's BackendState (Running, NeedsLogin, Starting, Stopped...), "down" = not running, "" = unknown. */
+    val backendState: String = "",
+    /** Login URL while [backendState] is NeedsLogin. */
+    val authUrl: String = "",
+    val selfName: String = "",
+    val selfIp: String = "",
+    val exitNodes: List<ExitNodeOption> = emptyList(),
+    /** Exit node the instance currently uses (from its own status) and whether it's reachable. */
+    val currentExitIp: String = "",
+    val currentExitOnline: Boolean = false,
+    /** Subnet routes the tailnet approved for this instance (and it serves). */
+    val approvedRoutes: List<String> = emptyList(),
+    val error: String = "",
+) {
+    val running: Boolean get() = backendState == "Running"
+    val needsLogin: Boolean get() = backendState == "NeedsLogin"
+    /** Signed in, but the tailnet requires an admin to approve new devices. */
+    val needsApproval: Boolean get() = backendState == "NeedsMachineAuth"
+
+    companion object {
+        fun parse(output: String): TailscaleInstance {
+            var t = TailscaleInstance()
+            val json = StringBuilder()
+            var inJson = false
+            for (raw in output.lineSequence()) {
+                val line = raw.trimEnd()
+                when {
+                    line == "JSON_BEGIN" -> inJson = true
+                    line == "JSON_END" -> inJson = false
+                    inJson -> json.appendLine(line)
+                    line.startsWith("TSSTATE=") -> t = t.copy(backendState = line.substringAfter('='))
+                    line.startsWith("TSAUTH=") -> t = t.copy(authUrl = line.substringAfter('='))
+                    line.startsWith("TSERR=") -> t = t.copy(error = line.substringAfter('='))
+                    line.startsWith("ERROR") -> t = t.copy(error = line.substringAfter(':').trim())
+                }
+            }
+            if (json.isBlank()) return t
+            return runCatching { fromStatusJson(org.json.JSONObject(json.toString()), t) }.getOrDefault(t)
+        }
+
+        /** Reads what the app shows from "tailscale status --json". */
+        private fun fromStatusJson(o: org.json.JSONObject, base: TailscaleInstance): TailscaleInstance {
+            fun ipv4(node: org.json.JSONObject?): String {
+                val ips = node?.optJSONArray("TailscaleIPs") ?: return ""
+                return (0 until ips.length()).map { ips.optString(it).substringBefore('/') }.firstOrNull { '.' in it } ?: ""
+            }
+            fun displayName(node: org.json.JSONObject): String =
+                node.optString("DNSName").substringBefore('.').ifBlank { node.optString("HostName") }
+            val self = o.optJSONObject("Self")
+            val nodes = mutableListOf<ExitNodeOption>()
+            o.optJSONObject("Peer")?.let { peers ->
+                for (key in peers.keys()) {
+                    val p = peers.optJSONObject(key) ?: continue
+                    if (!p.optBoolean("ExitNodeOption")) continue
+                    val ip = ipv4(p)
+                    if (ip.isBlank()) continue
+                    nodes += ExitNodeOption(displayName(p), ip, p.optBoolean("Online"), p.optString("OS"))
+                }
+            }
+            val exit = o.optJSONObject("ExitNodeStatus")
+            return base.copy(
+                backendState = o.optString("BackendState").ifBlank { base.backendState },
+                authUrl = o.optString("AuthURL").ifBlank { base.authUrl },
+                selfName = self?.let { displayName(it) } ?: "",
+                selfIp = ipv4(self),
+                exitNodes = nodes.sortedWith(compareBy({ !it.online }, { it.name.lowercase() })),
+                currentExitIp = ipv4(exit),
+                currentExitOnline = exit?.optBoolean("Online") ?: false,
+                approvedRoutes = self?.optJSONArray("PrimaryRoutes")?.let { r -> (0 until r.length()).map { r.optString(it) } } ?: emptyList(),
+            )
         }
     }
 }

@@ -9,6 +9,10 @@
 #   mh_engine.sh stop             stop and undo every change
 #   mh_engine.sh status [helper]  print state and connected clients (helper = path of the native stats tool)
 #   mh_engine.sh daemon           (internal) event loop + watchdog
+#   mh_engine.sh ts-install <tgz> <sha256>   install the official Tailscale package (exit nodes)
+#   mh_engine.sh ts-up <group> [hostname]    start a group's Tailscale instance (prints ts-status)
+#   mh_engine.sh ts-status <group>           instance state, login URL and status JSON
+#   mh_engine.sh ts-down <group> | ts-logout <group>
 #
 # <cfgdir> must contain:
 #   engine.conf  KEY=VALUE lines: IFACE, MAC, WIFI_MODE (keep|off), UPSTREAM (auto|<iface>), DEFAULT_GROUP, WL_HELPER
@@ -17,6 +21,7 @@
 #   groups.conf  ID GW PREFIX NETCIDR NETMASK INTERNET(0|1) ISOLATE(0|1) DHCP_START DHCP_END LEASE DNS(csv) TAILSCALE(0|1) REACH(csv ids|-)
 #   static.conf  MAC GROUP IP   (optional fixed addresses)
 #   deny.txt     blocked MACs   (optional)
+#   ts.conf      GROUP EXIT_NODE_IP|- SUBNET(0|1) HOSTNAME   (optional: groups with their own Tailscale instance)
 #
 # All sh variables are global: helpers called from loops use their own prefixes (h_, p_, d_...).
 
@@ -76,6 +81,8 @@ stale_boot() { [ -f $ST/boot_id ] && [ "$(cat $ST/boot_id)" != "$(cat /proc/sys/
 reset_stale() {
   stale_boot || return 1
   rm -f $ST/*.pid $ST/*.orig $ST/pins $ST/boot_id
+  rm -f $ST/ts/*/*.pid $ST/ts/*/exit $ST/ts/*/route $ST/ts/*/routeip $ST/ts/*/bstate $ST/ts/*/subnet $ST/ts/*/subnetok $ST/ts/ip_forward.orig
+  rm -rf $ST/ts/*/.lock
   : > $ST/connected; : > $ST/upstream; : > $ST/map
   [ "$(cat $ST/state 2>/dev/null)" = stopped ] || echo stopped > $ST/state
   return 0
@@ -93,7 +100,9 @@ group_exists() { [ -n "$1" ] && awk -v g="$1" '$1==g {f=1} END {exit !f}' $ST/cf
 upstream_table() {
   U=$(cfg UPSTREAM)
   if [ -z "$U" ] || [ "$U" = auto ]; then
-    ip route get 8.8.8.8 2>/dev/null | sed -n 's/.* table \([^ ]*\).*/\1/p' | head -1
+    # Ask as "protected from VPN" (netd's mark 0x20000): root's own lookups follow the Tailscale app's VPN, and
+    # with an exit node selected there that VPN covers 8.8.8.8 - it must never become the hotspot's upstream.
+    ip route get 8.8.8.8 mark 0x20000 2>/dev/null | grep -v ' dev tun' | sed -n 's/.* table \([^ ]*\).*/\1/p' | head -1
   else
     echo "$U"
   fi
@@ -122,27 +131,531 @@ apply_upstream() {
 # keeps a routing table named after it with the tailnet routes. Groups with Tailscale access look that table
 # up first; destinations it doesn't cover fall through to the upstream rule.
 
+# Newest interface holding a 100.64.0.0/10 address: while Tailscale rebuilds its VPN (any change: peers, exit
+# node, network) the old and new tun briefly coexist, and the name alternates tun0/tun1.
 tailscale_iface() {
   ip -4 -o addr show 2>/dev/null | awk '{ split($4, a, "/"); split(a[1], o, ".");
-    if (o[1] == 100 && o[2] >= 64 && o[2] <= 127) { print $2; exit } }'
+    if (o[1] == 100 && o[2] >= 64 && o[2] <= 127 && $1 + 0 > m) { m = $1 + 0; n = $2 } } END { if (n != "") print n }'
 }
 
+# $ST/tailscale = "<iface> <ifindex> <app-exit 0|1>": a rebuilt tun gets a new ifindex and so a new table number
+# (netd: 1000 + ifindex), even under the same name - the rules must follow it.
 apply_tailscale() {
   IF=$(cfg IFACE)
   a_ts=$(tailscale_iface)
   a_want=$(awk '$1 !~ /^#/ && $12 == "1" {print $4}' $ST/cfg/groups.conf)
   [ -z "$a_want" ] && a_ts=""
-  if [ "$a_ts" = "$(cat $ST/tailscale 2>/dev/null)" ] && { [ -z "$a_ts" ] || ip rule | grep -q "^$TS_PREF:"; }; then
+  a_key=""; a_exit=0
+  if [ -n "$a_ts" ]; then
+    [ -n "$(ip -4 route show table $a_ts match 1.1.1.1 2>/dev/null)" ] && a_exit=1
+    a_key="$a_ts $(cat /sys/class/net/$a_ts/ifindex 2>/dev/null) $a_exit"
+  fi
+  if [ "$a_key" = "$(cat $ST/tailscale 2>/dev/null)" ] && { [ -z "$a_ts" ] || ip rule | grep -q "^$TS_PREF:"; }; then
     return 0
   fi
   while ip rule del pref $TS_PREF 2>/dev/null; do :; done
   if [ -n "$a_ts" ]; then
-    for a_net in $a_want; do ip rule add pref $TS_PREF from $a_net iif $IF lookup $a_ts; done
-    log "tailscale -> $a_ts"
+    # Remember the tailnet's subnet routes while they're visible (never replace them with an empty list: a table
+    # being rebuilt is briefly empty) - needed if the app's exit node shows up as blocks instead of a default route.
+    if [ $a_exit = 0 ]; then
+      ip -4 route show table $a_ts 2>/dev/null |
+        awk '$1 != "default" && $1 ~ /^[0-9]/ && $1 !~ /^100\./ {print $1}' > $ST/ts_subnets.new
+      if [ -s $ST/ts_subnets.new ]; then mv $ST/ts_subnets.new $ST/ts_subnets; else rm -f $ST/ts_subnets.new; fi
+    fi
+    # Tailscale access means the tailnet, not the app's exit node. A plain default route (the app's exit node
+    # without "Allow LAN access") is skipped with suppress_prefixlength 0 and every tailnet/subnet route still
+    # applies. With LAN access the exit node is a set of blocks around the local networks: then only tailnet
+    # addresses and the remembered subnet routes go there.
+    a_def=""; [ $a_exit = 1 ] && a_def=$(ip -4 route show table $a_ts default 2>/dev/null)
+    for a_net in $a_want; do
+      if [ $a_exit = 0 ]; then
+        ip rule add pref $TS_PREF from $a_net iif $IF lookup $a_ts
+      elif [ -n "$a_def" ]; then
+        ip rule add pref $TS_PREF from $a_net iif $IF lookup $a_ts suppress_prefixlength 0
+      else
+        ip rule add pref $TS_PREF from $a_net to 100.64.0.0/10 iif $IF lookup $a_ts
+        for a_s in $(cat $ST/ts_subnets 2>/dev/null); do ip rule add pref $TS_PREF from $a_net to $a_s iif $IF lookup $a_ts; done
+      fi
+    done
+    if [ $a_exit = 1 ]; then log "tailscale -> $a_ts (the Tailscale app uses an exit node: tailnet only)"; else log "tailscale -> $a_ts"; fi
   elif [ -n "$a_want" ] && [ -s $ST/tailscale ]; then
     log "tailscale disconnected"
   fi
-  echo "$a_ts" > $ST/tailscale
+  echo "$a_key" > $ST/tailscale
+}
+
+# ---------------------------------------------------------------- per-group Tailscale instances (exit node, subnet route)
+# A group can send its internet out through a Tailscale exit node of its own. The Tailscale app holds one exit
+# node for the whole phone, so SegAP runs a separate tailscaled per such group (the official static binary; a
+# separate device in the tailnet), each in its own network namespace, joined to the phone by a veth pair:
+#   phone: sg<N> 198.18.<N>.1/30  <--->  198.18.<N>.2/30 sg<N>p  [namespace: tailscaled, tun "tailscale0"]
+# Inside its namespace tailscaled installs its usual policy routing (rules 52xx, table 52) without touching
+# Android's. The group's traffic enters through table TS_TABLE+N; the instance's own traffic (control, DERP,
+# WireGuard) leaves through the phone's upstream. <N> is the group's slot, kept in $TSD/<group>/slot.
+# A group can also be shared with the tailnet: its instance advertises the group's subnet as a subnet route, and
+# tailnet devices reach the group's devices through it (NATed to the instance's end of the link).
+# cfg/ts.conf: "<group> <exit node 100.x IP or -> <share subnet 0|1> <hostname>" per group with an instance.
+TSD=$ST/ts
+TS_LOCAL_PREF=10510   # ip rule: the phone's traffic to instance links -> local_network
+TS_UP_PREF=21310      # ip rule: instance uplinks -> upstream table
+EXIT_PREF=21450       # ip rule: groups using an exit node -> their instance (after TS_PREF, before PREF)
+TS_TABLE=60000        # + slot: "default via the instance"
+TS_HOLD=900000000     # + slot: the namespace holder runs "sleep <this>" (unique per slot, ~28 years)
+
+ts_bin_ok() { [ -x $TSD/bin/tailscaled ] && [ -x $TSD/bin/tailscale ]; }
+
+# tsc <group> <tailscale args...>: the CLI of <group>'s instance (bounded: a wedged daemon must not hang us).
+tsc() { c_g=$1; shift; timeout 20 $TSD/bin/tailscale --socket=$TSD/$c_g/tailscaled.sock "$@"; }
+
+ts_slot() {
+  [ -s $TSD/$1/slot ] && { cat $TSD/$1/slot; return 0; }
+  sl_n=1
+  while [ $sl_n -le 250 ] && cat $TSD/*/slot 2>/dev/null | grep -qx "$sl_n"; do sl_n=$((sl_n + 1)); done
+  [ $sl_n -le 250 ] || return 1
+  echo $sl_n > $TSD/$1/slot; echo $sl_n
+}
+
+# ts_holder <group> <slot>: pid of the group's namespace holder, if alive.
+ts_holder() { ho_p=$(cat $TSD/$1/holder.pid 2>/dev/null); pid_ok "$ho_p" "sleep $((TS_HOLD + $2)) " && echo "$ho_p"; }
+
+# ts_ready <group> <slot>: the namespace was set up completely (ts_net_up writes the holder's pid to "netready"
+# only at the very end; an engine killed half-way leaves it missing) and its link still exists.
+ts_ready() {
+  rd_h=$(ts_holder $1 $2)
+  [ -n "$rd_h" ] && [ "$(cat $TSD/$1/netready 2>/dev/null)" = "$rd_h" ] && [ -d /sys/class/net/sg$2 ]
+}
+
+ts_daemon_ok() { pid_ok "$(cat $TSD/$1/tailscaled.pid 2>/dev/null)" "statedir=$TSD/$1 "; }
+
+ts_daemon_kill() {
+  dk_p=$(cat $TSD/$1/tailscaled.pid 2>/dev/null)
+  ts_daemon_ok $1 || return 0
+  kill $dk_p 2>/dev/null
+  dk_w=0; while [ $dk_w -lt 10 ] && ts_daemon_ok $1; do sleep 0.3; dk_w=$((dk_w + 1)); done
+  ts_daemon_ok $1 && kill -9 $dk_p 2>/dev/null
+  rm -f $TSD/$1/tailscaled.pid $TSD/$1/tailscaled.sock
+}
+
+# The watchdog and the app (network editor) may both bring up or tear down the same instance: one at a time.
+# mkdir is atomic. The engine clears all locks when it kills its watchdog (kill_engine_procs); any other stale
+# lock is broken after 30 s. The group directory itself may vanish meanwhile (ts_logout): re-create it.
+ts_lock() {
+  lk_w=0
+  while ! { mkdir -p $TSD/$1 2>/dev/null; mkdir $TSD/$1/.lock 2>/dev/null; }; do
+    lk_w=$((lk_w + 1))
+    [ $lk_w -ge 60 ] && { rm -rf $TSD/$1/.lock; mkdir -p $TSD/$1/.lock 2>/dev/null; break; }
+    sleep 0.5
+  done
+}
+ts_unlock() { rmdir $TSD/$1/.lock 2>/dev/null; }
+
+# Main-namespace firewall for the instances. Their own traffic (control, DERP, WireGuard) may go out to the
+# upstream. Anything between an instance and the AP interface is left to the hotspot's chain (exit-node traffic,
+# replies, shared subnets - after its anti-spoof check). Nothing from an instance may reach the phone itself:
+# a shared subnet's gateway address is the phone.
+ts_fw() {
+  fw_ap=$(cfg IFACE); fw_ap=${fw_ap:-swlan0}
+  if $IPT -C FORWARD -j sg_FWD 2>/dev/null && $IPT -C sg_FWD -i sg+ -o $fw_ap -j RETURN 2>/dev/null \
+    && $IPT -t nat -C POSTROUTING -j sg_NAT 2>/dev/null && $IPT -C INPUT -j sg_IN 2>/dev/null; then
+    return 0
+  fi
+  $IPT -N sg_FWD 2>/dev/null; $IPT -F sg_FWD
+  $IPT -A sg_FWD -i $fw_ap -o sg+ -j RETURN
+  $IPT -A sg_FWD -i sg+ -o $fw_ap -j RETURN
+  $IPT -A sg_FWD -o sg+ -d 198.18.0.0/16 -m state --state ESTABLISHED,RELATED -j ACCEPT
+  $IPT -A sg_FWD -i sg+ -o sg+ -j DROP
+  $IPT -A sg_FWD -i sg+ -s 198.18.0.0/16 -j ACCEPT
+  $IPT -C FORWARD -j sg_FWD 2>/dev/null || $IPT -I FORWARD 1 -j sg_FWD
+  $IPT -N sg_IN 2>/dev/null; $IPT -F sg_IN
+  $IPT -A sg_IN -i sg+ -m state --state ESTABLISHED,RELATED -j ACCEPT
+  $IPT -A sg_IN -i sg+ -j DROP
+  $IPT -C INPUT -j sg_IN 2>/dev/null || $IPT -I INPUT 1 -j sg_IN
+  $IPT -t nat -N sg_NAT 2>/dev/null; $IPT -t nat -F sg_NAT
+  $IPT -t nat -A sg_NAT -s 198.18.0.0/16 ! -o sg+ -j MASQUERADE
+  $IPT -t nat -C POSTROUTING -j sg_NAT 2>/dev/null || $IPT -t nat -I POSTROUTING 1 -j sg_NAT
+}
+
+ts_fw_teardown() {
+  while $IPT -D FORWARD -j sg_FWD 2>/dev/null; do :; done
+  while $IPT -D INPUT -j sg_IN 2>/dev/null; do :; done
+  while $IPT -t nat -D POSTROUTING -j sg_NAT 2>/dev/null; do :; done
+  for fw_c in sg_FWD sg_IN; do $IPT -F $fw_c 2>/dev/null; $IPT -X $fw_c 2>/dev/null; done
+  $IPT -t nat -F sg_NAT 2>/dev/null; $IPT -t nat -X sg_NAT 2>/dev/null
+}
+
+# ts_uplink <slot>: the instance's own traffic follows the phone's current upstream. Returns 2 when it moved
+# from another upstream: the instance's connections are NATed to the old one and must be reopened.
+ts_uplink() {
+  ul_v=sg$1; ul_t=$(upstream_table)
+  [ -n "$ul_t" ] && ip rule | grep -qE "^$TS_UP_PREF:.* iif $ul_v lookup $ul_t( |\$)" && return 0
+  ul_old=$(ip rule | grep -E "^$TS_UP_PREF:.* iif $ul_v lookup " | head -1)
+  while ip rule del pref $TS_UP_PREF iif $ul_v 2>/dev/null; do :; done
+  [ -n "$ul_t" ] || return 0
+  ip rule add pref $TS_UP_PREF iif $ul_v lookup $ul_t
+  [ -n "$ul_old" ] && return 2
+  return 0
+}
+
+# ts_net_down <group> <slot>: remove the group's link, routes and rules (the namespace dies with its holder).
+ts_net_down() {
+  ip link del sg$2 2>/dev/null
+  while ip rule del pref $TS_LOCAL_PREF to 198.18.$2.0/30 2>/dev/null; do :; done
+  while ip rule del pref $TS_UP_PREF iif sg$2 2>/dev/null; do :; done
+  while ip rule del pref $EXIT_PREF lookup $((TS_TABLE + $2)) 2>/dev/null; do :; done
+  ip route flush table $((TS_TABLE + $2)) 2>/dev/null
+  rm -f $TSD/$1/netready
+}
+
+# ts_relink <slot>: drop every connection NATed onto the group's link (removing an address makes the kernel flush
+# MASQUERADE entries of that interface), e.g. after the group fell back to the normal upstream: those flows
+# would otherwise leave the upstream with a 198.18 source and hang.
+ts_relink() {
+  ip addr del 198.18.$1.1/30 dev sg$1 2>/dev/null
+  ip addr add 198.18.$1.1/30 dev sg$1
+  ip route replace 198.18.$1.0/30 dev sg$1 table local_network
+  ip route replace default via 198.18.$1.2 dev sg$1 table $((TS_TABLE + $1))
+}
+
+# ts_net_up <group>: make sure the group's instance runs: namespace (rebuilt if missing or half-built), link,
+# firewall, uplink and tailscaled.
+ts_net_up() {
+  tu_g=$1
+  ts_bin_ok || { echo "TSERR=Tailscale for SegAP is not installed"; return 1; }
+  mkdir -p $TSD/$tu_g; chmod 700 $TSD $TSD/$tu_g
+  tu_n=$(ts_slot $tu_g) || { echo "TSERR=Too many Tailscale instances"; return 1; }
+  tu_v=sg$tu_n; tu_vn=sg${tu_n}p
+  # Instances talk to the internet through the phone: forwarding must be on even while the hotspot is off.
+  if [ "$(cat /proc/sys/net/ipv4/ip_forward)" != 1 ]; then
+    [ -f $TSD/ip_forward.orig ] || cat /proc/sys/net/ipv4/ip_forward > $TSD/ip_forward.orig
+    echo 1 > /proc/sys/net/ipv4/ip_forward
+  fi
+  if ! ts_ready $tu_g $tu_n; then
+    ts_daemon_kill $tu_g
+    tu_h=$(ts_holder $tu_g $tu_n); [ -n "$tu_h" ] && kill $tu_h 2>/dev/null
+    ts_net_down $tu_g $tu_n
+    rm -f $TSD/$tu_g/holder.pid $TSD/$tu_g/subnet
+    [ -e /dev/net/tun ] || { mkdir -p /dev/net; ln -s ../tun /dev/net/tun; }
+    unshare -n sleep $((TS_HOLD + tu_n)) </dev/null >/dev/null 2>&1 &
+    echo $! > $TSD/$tu_g/holder.pid
+    sleep 1
+    tu_h=$(ts_holder $tu_g $tu_n)
+    [ -n "$tu_h" ] || { echo "TSERR=Could not create a network namespace"; return 1; }
+    if ! { ip link add $tu_v type veth peer name $tu_vn && ip link set $tu_vn netns $tu_h; }; then
+      kill $tu_h 2>/dev/null; ts_net_down $tu_g $tu_n
+      echo "TSERR=Could not create the link to the Tailscale instance"; return 1
+    fi
+    ip addr add 198.18.$tu_n.1/30 dev $tu_v
+    ip link set $tu_v up
+    ip route replace 198.18.$tu_n.0/30 dev $tu_v table local_network
+    ip rule add pref $TS_LOCAL_PREF to 198.18.$tu_n.0/30 lookup local_network
+    ip route replace default via 198.18.$tu_n.2 dev $tu_v table $((TS_TABLE + tu_n))
+    # Inside, in order:
+    # - default route back through the phone: tailscaled's own (marked) traffic uses it;
+    # - replies to the phone's end of the link must not follow table 52 into the tunnel (rule 100);
+    # - whatever comes out of the tunnel goes to the link (rule 120): replies of flows NATed for the normal upstream
+    #   before the group switched to the exit node then reach the device (as the server's reset) instead of
+    #   looping back into the tunnel, so its apps reconnect at once;
+    # - forwarded traffic may only go to public addresses (not the tailnet, not the exit node's LAN or its
+    #   subnet routes), is NATed to the node's tailnet address (exit nodes only accept that) and gets its TCP MSS
+    #   clamped for the 1280-byte tunnel;
+    # - nothing is forwarded from the tunnel into the link except replies, and for a shared subnet what
+    #   ts_set_subnet puts into SG_RT.
+    # toybox nsenter keeps parsing options after the command: "--" is required.
+    tu_ok=$(nsenter -t $tu_h -n -- sh -c "
+      set -e
+      ip link set lo up
+      ip addr add 198.18.$tu_n.2/30 dev $tu_vn; ip link set $tu_vn up
+      ip route add default via 198.18.$tu_n.1
+      ip rule add pref 100 to 198.18.$tu_n.0/30 lookup main
+      ip rule add pref 120 iif tailscale0 lookup main
+      echo 1 > /proc/sys/net/ipv4/ip_forward
+      $IPT -N SG_RT; $IPT -I FORWARD 1 -j SG_RT
+      $IPT -t nat -N SG_RTNAT; $IPT -t nat -I POSTROUTING 1 -j SG_RTNAT
+      $IPT -t nat -A POSTROUTING -o tailscale0 -j MASQUERADE
+      for d in 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 198.18.0.0/15 224.0.0.0/3; do
+        $IPT -A FORWARD -i $tu_vn -o tailscale0 -d \$d -j DROP
+      done
+      $IPT -A FORWARD -i $tu_vn -o tailscale0 -j ACCEPT
+      $IPT -A FORWARD -i tailscale0 -o $tu_vn -m state --state ESTABLISHED,RELATED -j ACCEPT
+      $IPT -P FORWARD DROP
+      $IPT -t mangle -A FORWARD -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+      $IPT -t mangle -A FORWARD -i tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240
+      echo SETUP-OK" 2>&1 | tail -1)
+    if [ "$tu_ok" != SETUP-OK ]; then
+      kill $tu_h 2>/dev/null; ts_net_down $tu_g $tu_n
+      echo "TSERR=Could not set up the Tailscale instance's network ($tu_ok)"; return 1
+    fi
+    echo $tu_h > $TSD/$tu_g/netready
+  fi
+  ts_fw
+  ts_uplink $tu_n
+  [ $? = 2 ] && { log "$tu_g: upstream changed - restarting its Tailscale"; ts_daemon_kill $tu_g; }
+  # Appending (">>"), so truncating a large log takes effect while the daemon runs.
+  [ "$(stat -c %s $TSD/$tu_g/tailscaled.log 2>/dev/null || echo 0)" -gt 2000000 ] && : > $TSD/$tu_g/tailscaled.log
+  if ! ts_daemon_ok $tu_g; then
+    rm -f $TSD/$tu_g/tailscaled.sock
+    HOME=$TSD/$tu_g nsenter -t $(ts_holder $tu_g $tu_n) -n -- $TSD/bin/tailscaled --tun=tailscale0 --statedir=$TSD/$tu_g \
+      --socket=$TSD/$tu_g/tailscaled.sock --port=0 --no-logs-no-support </dev/null >>$TSD/$tu_g/tailscaled.log 2>&1 &
+    echo $! > $TSD/$tu_g/tailscaled.pid
+    tu_w=0; while [ $tu_w -lt 20 ] && [ ! -S $TSD/$tu_g/tailscaled.sock ]; do sleep 0.5; tu_w=$((tu_w + 1)); done
+    sleep 1
+  fi
+  return 0
+}
+
+ts_backend() { tsc $1 status --json --peers=false 2>/dev/null | sed -n 's/.*"BackendState": "\([A-Za-z]*\)".*/\1/p' | head -1; }
+
+# ts_session <group> <hostname> <BackendState>: keep the device name; when it isn't signed in, run "tailscale up",
+# which prints the login URL (ts_info shows it) and waits for the login. "up --reset" drops the exit node and the
+# advertised route: forget that they were set, so they're set again after the login.
+ts_session() {
+  ss_host=${2:-segap-$1}
+  case "$3" in
+    Running|Starting)
+      if [ "$ss_host" != "$(cat $TSD/$1/host 2>/dev/null)" ]; then
+        tsc $1 set --hostname="$ss_host" >/dev/null 2>&1 && echo "$ss_host" > $TSD/$1/host
+      fi
+      ;;
+    NeedsLogin|Stopped|NoState)
+      # NoState right after a start is normal for a signed-in node: only a node without state needs a login then.
+      [ "$3" = NoState ] && [ -s $TSD/$1/tailscaled.state ] && return 0
+      if ! pgrep -f "$TSD/$1/tailscaled[.]sock up" >/dev/null 2>&1; then
+        rm -f $TSD/$1/subnet
+        $TSD/bin/tailscale --socket=$TSD/$1/tailscaled.sock up --json --reset --hostname="$ss_host" \
+          --accept-dns=false --accept-routes=false --netfilter-mode=off --timeout=600s </dev/null >$TSD/$1/up.json 2>&1 &
+        echo "$ss_host" > $TSD/$1/host
+      fi
+      ;;
+    # NeedsMachineAuth: signed in, waiting for an admin to approve the device - nothing to do here.
+  esac
+}
+
+# ts_up <group> [hostname]: instance running plus, if needed, a login started (the app's editor uses this).
+ts_up() {
+  ts_net_up $1 || return 1
+  ts_session $1 "$2" "$(ts_backend $1)"
+  return 0
+}
+
+# ts_probe <group> [subnet]: "<BackendState|down> <exit node online 0|1> <subnet route approved 0|1> <exit node IP|->"
+# from the instance itself (an approved, active route is listed in its PrimaryRoutes).
+ts_probe() {
+  tsc $1 status --json --peers=false 2>/dev/null | awk -v n="$2" '
+    /"BackendState":/ { gsub(/[",]/, "", $2); b = $2 }
+    /"ExitNodeStatus":/ { e = NR }
+    e && NR <= e + 3 && /"Online": true/ { o = 1 }
+    e && !ed && /"TailscaleIPs": \[/ { ti = 1; next }
+    ti && /\]/ { ti = 0; ed = 1 }
+    ti && x == "" { v = $0; gsub(/[ \t",]/, "", v); split(v, q, "/"); if (q[1] ~ /^[0-9]+\./) x = q[1] }
+    /"PrimaryRoutes": \[/ { p = 1 }
+    p && n != "" && index($0, "\"" n "\"") { a = 1 }
+    p && /\]/ { p = 0 }
+    END { print (b == "" ? "down" : b), o + 0, a + 0, (x == "" ? "-" : x) }'
+}
+
+# ts_set_exit <group> <100.x IP|->: point the instance at its exit node, or none.
+ts_set_exit() {
+  se_e=$2; [ "$se_e" = - ] && se_e=""
+  tsc $1 set --exit-node="$se_e" --exit-node-allow-lan-access=false >/dev/null 2>&1 || return 1
+  log "exit node for $1: ${se_e:-none}"
+}
+
+# ts_set_subnet <group> <slot> <subnet|->: share the group's subnet with the tailnet through its instance, or stop.
+# Inside the namespace: traffic from the tailnet to the subnet is forwarded to the subnet only (never to the
+# phone: the main namespace's sg_IN drops that) and NATed to this end of the link, so the devices' replies come
+# back here instead of going to the Tailscale app's VPN. The tailnet still has to approve the route (admin
+# console, or autoApprovers).
+ts_set_subnet() {
+  [ "$(cat $TSD/$1/subnet 2>/dev/null)" = "$3" ] && return 0
+  sn_h=$(ts_holder $1 $2); [ -n "$sn_h" ] || return 1
+  sn_a=""; [ "$3" != - ] && sn_a=$3
+  tsc $1 set --advertise-routes="$sn_a" >/dev/null 2>&1 || return 1
+  nsenter -t $sn_h -n -- sh -c "
+    $IPT -F SG_RT; $IPT -t nat -F SG_RTNAT
+    if [ -n '$sn_a' ]; then
+      $IPT -A SG_RT -i tailscale0 -o sg${2}p -d $sn_a -j ACCEPT
+      $IPT -A SG_RT -i sg${2}p -o tailscale0 -s $sn_a -m state --state ESTABLISHED,RELATED -j ACCEPT
+      $IPT -t nat -A SG_RTNAT -o sg${2}p -d $sn_a -j MASQUERADE
+    fi"
+  echo "$3" > $TSD/$1/subnet
+  if [ -n "$sn_a" ]; then log "$1: subnet $sn_a advertised to the tailnet"; else log "$1: subnet not advertised"; fi
+}
+
+# ts_down <group>: stop the group's instance and remove its namespace (keeps its login).
+ts_down() {
+  td_n=$(cat $TSD/$1/slot 2>/dev/null); [ -n "$td_n" ] || return 0
+  pkill -f "$TSD/$1/tailscaled[.]sock up" 2>/dev/null
+  ts_daemon_kill $1
+  td_h=$(ts_holder $1 $td_n); [ -n "$td_h" ] && kill $td_h 2>/dev/null
+  ts_net_down $1 $td_n
+  rm -f $TSD/$1/tailscaled.pid $TSD/$1/holder.pid $TSD/$1/route $TSD/$1/routeip $TSD/$1/bstate $TSD/$1/tailscaled.sock \
+    $TSD/$1/subnet $TSD/$1/subnetok
+}
+
+# No instance left: remove their firewall chains and undo our ip_forward change.
+ts_idle() {
+  for ti_d in $TSD/*/; do
+    ti_g=$(basename "$ti_d"); ti_n=$(cat "$ti_d/slot" 2>/dev/null) || continue
+    [ -n "$ti_n" ] && [ -n "$(ts_holder $ti_g $ti_n)" ] && return 0
+  done
+  ts_fw_teardown
+  if [ -f $TSD/ip_forward.orig ]; then
+    [ "$(cat $ST/state 2>/dev/null)" = running ] || cat $TSD/ip_forward.orig > /proc/sys/net/ipv4/ip_forward
+    rm -f $TSD/ip_forward.orig
+  fi
+}
+
+ts_down_all() {
+  for ta_d in $TSD/*/; do
+    [ -f "$ta_d/slot" ] || continue
+    ta_g=$(basename "$ta_d"); ts_lock "$ta_g"; ts_down "$ta_g"; ts_unlock "$ta_g"
+  done
+  ts_idle
+}
+
+# Instances of groups that no longer have one.
+ts_down_unused() {
+  for tr_d in $TSD/*/; do
+    tr_g=$(basename "$tr_d"); [ -f "$tr_d/slot" ] || continue
+    awk -v g="$tr_g" '$1 == g {f = 1} END {exit !f}' $ST/cfg/ts.conf 2>/dev/null && continue
+    ts_lock "$tr_g"; ts_down "$tr_g"; ts_unlock "$tr_g"
+  done
+}
+
+# After a restart (Apply keeps the instances), route exit groups whose instance was active straight back into it,
+# instead of leaving their devices on the normal upstream until the watchdog's next pass.
+ts_resume_exits() {
+  [ -s $ST/cfg/ts.conf ] || return 0
+  while read -r x_g x_ip x_sn x_rest; do
+    case "$x_g" in ''|\#*) continue ;; esac
+    # Only if the instance still points at the node this config wants (Apply may have changed it).
+    [ "$x_ip" != - ] && [ "$(cat $TSD/$x_g/route 2>/dev/null)" = active ] && [ "$(cat $TSD/$x_g/routeip 2>/dev/null)" = "$x_ip" ] || continue
+    x_n=$(cat $TSD/$x_g/slot 2>/dev/null); x_net=$(group_field "$x_g" 4)
+    [ -n "$x_n" ] && [ -n "$x_net" ] && ts_ready $x_g $x_n && ts_daemon_ok $x_g || continue
+    ip rule add pref $EXIT_PREF from $x_net iif $IF lookup $((TS_TABLE + x_n))
+  done < $ST/cfg/ts.conf
+}
+
+# Groups with an instance (ts.conf): keep it running and configured. With an exit node, route the group into it
+# while that node is usable - online, still offered as an exit node, and selected - otherwise the group keeps
+# the normal upstream (rule PREF). With a shared subnet, advertise it.
+apply_instances() {
+  IF=$(cfg IFACE)
+  [ -s $ST/cfg/ts.conf ] || return 0
+  while read -r x_g x_ip x_sn x_host x_rest; do
+    case "$x_g" in ''|\#*) continue ;; esac
+    x_net=$(group_field "$x_g" 4); [ -n "$x_net" ] || continue
+    x_want=-; [ "$x_sn" = 1 ] && x_want=$x_net
+    ts_lock "$x_g"
+    if ! ts_net_up "$x_g" >/dev/null 2>&1; then
+      x_bs=down; x_on=0; x_ok=0; x_cur=-
+    else
+      set -- $(ts_probe $x_g $x_net); x_bs=$1; x_on=$2; x_ok=$3; x_cur=$4
+      ts_session "$x_g" "$x_host" "$x_bs"
+      if [ "$x_bs" = Running ]; then
+        x_ch=0
+        if [ "$x_cur" != "$x_ip" ]; then ts_set_exit "$x_g" "$x_ip" && x_ch=1; fi
+        if [ "$(cat $TSD/$x_g/subnet 2>/dev/null)" != "$x_want" ]; then ts_set_subnet "$x_g" "$(cat $TSD/$x_g/slot)" "$x_want" && x_ch=1; fi
+        if [ $x_ch = 1 ]; then sleep 2; set -- $(ts_probe $x_g $x_net); x_bs=$1; x_on=$2; x_ok=$3; x_cur=$4; fi
+      fi
+    fi
+    x_n=$(cat $TSD/$x_g/slot 2>/dev/null)
+    echo "$x_bs" > $TSD/$x_g/bstate
+    echo "$x_ok" > $TSD/$x_g/subnetok
+    x_r=none
+    if [ "$x_ip" != - ]; then
+      x_r=fallback
+      if [ "$x_bs" = Running ] && [ "$x_on" = 1 ] && [ "$x_cur" = "$x_ip" ]; then
+        # Online alone isn't enough: the node may have stopped offering itself as an exit node (its 0/0 then goes
+        # nowhere). It must still be listed.
+        tsc $x_g exit-node list 2>/dev/null | grep -q " $x_ip " && x_r=active
+      fi
+    fi
+    x_old=$(cat $TSD/$x_g/route 2>/dev/null)
+    if [ $x_r = active ]; then
+      echo "$x_ip" > $TSD/$x_g/routeip
+      ip rule | grep -qE "^$EXIT_PREF:.*from $x_net iif $IF lookup $((TS_TABLE + x_n))( |\$)" \
+        || ip rule add pref $EXIT_PREF from $x_net iif $IF lookup $((TS_TABLE + x_n))
+    else
+      while ip rule del pref $EXIT_PREF from $x_net iif $IF 2>/dev/null; do :; done
+      # Flows NATed onto the link would now leave the upstream with a 198.18 source: drop them.
+      [ "$x_old" = active ] && [ -n "$x_n" ] && [ -d /sys/class/net/sg$x_n ] && ts_relink $x_n
+    fi
+    ts_unlock "$x_g"
+    if [ "$x_r" != "$x_old" ]; then
+      echo $x_r > $TSD/$x_g/route
+      [ $x_r != none ] && log "exit $x_g: $x_r (node $x_ip, tailscale ${x_bs:-down})"
+    fi
+  done < $ST/cfg/ts.conf
+}
+
+# ts_info <group>: instance state for the app: TSSTATE, TSAUTH (login URL) and the full status JSON.
+ts_info() {
+  tn_n=$(cat $TSD/$1/slot 2>/dev/null)
+  if [ -n "$tn_n" ] && ts_ready $1 $tn_n; then
+    ts_uplink $tn_n
+    [ $? = 2 ] && { log "$1: upstream changed - restarting its Tailscale"; ts_daemon_kill $1; }
+  fi
+  if ! ts_daemon_ok $1; then echo "TSSTATE=down"; return 0; fi
+  tn_j=$TSD/$1/status.$$
+  tsc $1 status --json > $tn_j 2>/dev/null
+  tn_bs=$(sed -n 's/.*"BackendState": "\([A-Za-z]*\)".*/\1/p' $tn_j | head -1)
+  echo "TSSTATE=${tn_bs:-starting}"
+  tn_u=$(sed -n 's/.*"AuthURL": "\(https:[^"]*\)".*/\1/p' $tn_j | head -1)
+  [ -z "$tn_u" ] && tn_u=$(sed -n 's/.*"AuthURL": "\(https:[^"]*\)".*/\1/p' $TSD/$1/up.json 2>/dev/null | head -1)
+  # NeedsMachineAuth: the link was used already; an admin has to approve the device.
+  [ "$tn_bs" = NeedsLogin ] && [ -n "$tn_u" ] && echo "TSAUTH=$tn_u"
+  echo "JSON_BEGIN"; cat $tn_j; echo; echo "JSON_END"
+  rm -f $tn_j
+}
+
+# ts_install <package.tgz> <sha256>: the official static linux/arm64 package -> $TSD/bin.
+ts_install() {
+  [ -f "$1" ] || { echo "ERROR: $1 not found"; return 1; }
+  [ "$(sha256sum "$1" | cut -d' ' -f1)" = "$2" ] || { echo "ERROR: checksum mismatch"; return 1; }
+  rm -rf $TSD/tmp; mkdir -p $TSD/tmp $TSD/bin; chmod 700 $TSD
+  tar -xzf "$1" -C $TSD/tmp || { rm -rf $TSD/tmp; echo "ERROR: could not unpack the package"; return 1; }
+  for in_b in tailscaled tailscale; do
+    in_f=$(find $TSD/tmp -type f -name $in_b | head -1)
+    [ -n "$in_f" ] || { rm -rf $TSD/tmp; echo "ERROR: $in_b is missing from the package"; return 1; }
+    chown 0:0 "$in_f"; chmod 700 "$in_f"
+    mv "$in_f" $TSD/bin/$in_b.new && mv $TSD/bin/$in_b.new $TSD/bin/$in_b
+  done
+  rm -rf $TSD/tmp
+  in_v=$($TSD/bin/tailscaled --version 2>/dev/null | head -1)
+  [ -n "$in_v" ] || { echo "ERROR: tailscaled does not run on this phone"; return 1; }
+  echo "$in_v" > $TSD/bin/version
+  echo "OK $in_v"
+}
+
+# ts_logout <group>: sign the instance out of the tailnet and forget it.
+ts_logout() {
+  if [ -f $TSD/$1/slot ] && ts_bin_ok; then
+    ts_daemon_ok $1 || ts_net_up $1 >/dev/null 2>&1
+    tsc $1 logout >/dev/null 2>&1
+  fi
+  ts_down $1
+  rm -rf $TSD/$1
+  ts_idle
+  echo "OK"
+}
+
+# ts_gc <group ids the app knows, comma-separated>: instances nobody needs. The app runs this once when it
+# starts: an editor that was open when the app died couldn't clean up. Instances of networks the app doesn't know
+# (a new network that was never saved) are signed out of the tailnet; the others are stopped - while the hotspot
+# runs only those of groups without an instance.
+ts_gc() {
+  if [ -n "$1" ]; then
+    for gc_d in $TSD/*/; do
+      gc_g=$(basename "$gc_d"); [ -f "$gc_d/slot" ] || continue
+      case ",$1," in
+        *",$gc_g,"*) ;;
+        *) ts_lock "$gc_g"; ts_logout "$gc_g" >/dev/null; log "signed out the Tailscale device of unknown network $gc_g" ;;
+      esac
+    done
+  fi
+  if [ "$(cat $ST/state 2>/dev/null)" = running ]; then ts_down_unused; ts_idle; else ts_down_all; fi
+  echo "OK"
 }
 
 # ---------------------------------------------------------------- firewall
@@ -199,6 +712,18 @@ fw_setup() {
       $IPT -t nat -A mh_NAT -s $net ! -o $IF -j MASQUERADE
     fi
   done < $ST/cfg/groups.conf
+  # Groups shared with the tailnet: their instance (NATing the tailnet's connections to its end of the link) may
+  # open connections to the group's devices; the devices' replies go back to it even without internet access.
+  if [ -s $ST/cfg/ts.conf ]; then
+    while read -r f_g f_ip f_sn f_rest; do
+      case "$f_g" in ''|\#*) continue ;; esac
+      [ "$f_sn" = 1 ] || continue
+      f_net=$(group_field "$f_g" 4); [ -n "$f_net" ] || continue
+      mkdir -p $TSD/$f_g; f_n=$(ts_slot "$f_g") || continue
+      $IPT -A mh_FWD -i sg$f_n -o $IF -s 198.18.$f_n.2 -d $f_net -j ACCEPT
+      $IPT -A mh_FWD -i $IF -o sg$f_n -s $f_net -d 198.18.$f_n.2 -m state --state ESTABLISHED,RELATED -j ACCEPT
+    done < $ST/cfg/ts.conf
+  fi
   $IPT -A mh_FWD -i $IF -j DROP
   $IPT -A mh_FWD -o $IF -j DROP
   $IPT -A mh_XG -j DROP
@@ -369,8 +894,10 @@ net_teardown() {
   fw_teardown
   while ip rule del pref $PREF 2>/dev/null; do :; done
   while ip rule del pref $TS_PREF 2>/dev/null; do :; done
+  while ip rule del pref $EXIT_PREF 2>/dev/null; do :; done
   while ip rule del pref $LOCAL_PREF 2>/dev/null; do :; done
   : > $ST/tailscale 2>/dev/null
+  # (Route state files stay: a restart re-routes exit groups whose instance is still active, see ts_resume_exits.)
 
   if [ -n "$t_if" ] && [ -f $ST/cfg/groups.conf ]; then
     while read -r id gw pfx net rest; do
@@ -428,6 +955,7 @@ watchdog() {
       restore_wifi
       echo failed > $ST/state
       echo "$w_reason" > $ST/reason
+      ts_down_all
       w_p=$(cat $ST/daemon.pid 2>/dev/null); pid_ok "$w_p" mh_engine && kill "$w_p" 2>/dev/null
       pkill -f "logcat -T 1 -b main -s hostap[d]" 2>/dev/null
       rm -f $ST/daemon.pid $ST/watchdog.pid
@@ -439,6 +967,7 @@ watchdog() {
     fi
     apply_upstream
     apply_tailscale
+    apply_instances
     [ "$(cat /proc/sys/net/ipv4/ip_forward)" = 1 ] || { echo 1 > /proc/sys/net/ipv4/ip_forward; log "ip_forward re-enabled"; }
     if ! fw_hooks_ok; then
       log "firewall hooks missing - rebuilding"
@@ -473,6 +1002,8 @@ kill_engine_procs() {
   pkill -f "mh_engine[.]sh daemon" 2>/dev/null
   pkill -f "logcat -T 1 -b main -s hostap[d]" 2>/dev/null
   pkill -f "hostapd $HD/hostapd[.]conf" 2>/dev/null
+  # A killed watchdog may have held instance locks; nobody else holds them now (the app's calls are serialized).
+  rm -rf $TSD/*/.lock 2>/dev/null
 }
 
 # ---------------------------------------------------------------- start / stop
@@ -562,8 +1093,15 @@ start() {
   echo 0 > /proc/sys/net/ipv4/conf/all/send_redirects
   echo 1 > /proc/sys/net/ipv4/ip_forward
 
+  # Exit groups whose instance survived the restart (Apply) go straight back into it, before any device can use
+  # the normal upstream rule set up next.
+  ts_resume_exits
   apply_upstream || log "no upstream yet - will retry"
   apply_tailscale
+  # Tailscale instances: drop the ones no group uses any more; the watchdog starts the others and routes their
+  # groups into them once their exit node is reachable (until then those groups use the normal upstream).
+  ts_down_unused
+  [ -s $ST/cfg/ts.conf ] && ts_fw
 
   gen_dnsmasq $IF
   if ! start_dnsmasq; then
@@ -584,6 +1122,8 @@ stop() {
   net_teardown
   [ "$1" = keepwifi ] || restore_wifi
   echo stopped > $ST/state; rm -f $ST/reason $ST/boot_id
+  # A restart (start runs "stop keepwifi") keeps the exit-node instances: the new run reuses them.
+  [ "$1" = keepwifi ] || ts_down_all
   log "stopped"
   echo "OK"
 }
@@ -603,9 +1143,21 @@ status() {
   [ -n "$s_reason" ] && echo "REASON=$s_reason"
   echo "IFACE=$(cfg IFACE)"
   echo "UPSTREAM=$(cat $ST/upstream 2>/dev/null)"
-  echo "TAILSCALE=$(cat $ST/tailscale 2>/dev/null)"
+  echo "TAILSCALE=$(cut -d' ' -f1 $ST/tailscale 2>/dev/null)"
+  echo "TSBIN=$(cat $TSD/bin/version 2>/dev/null)"
   # Fingerprint of the config the engine runs (files in name order), so the app can tell which settings are live.
   [ "$s_state" = running ] && echo "CFGSUM=$(cat $ST/cfg/* 2>/dev/null | md5sum | cut -d' ' -f1)"
+  # As of the watchdog's last pass:
+  #   EXIT <group> <active|fallback> <tailscale state|-> <exit node ip>
+  #   SUBNET <group> <subnet> <route approved 0|1> <tailscale state|->
+  if [ "$s_state" = running ] && [ -s $ST/cfg/ts.conf ]; then
+    while read -r x_g x_ip x_sn x_rest; do
+      case "$x_g" in ''|\#*) continue ;; esac
+      x_bs=$(cat $TSD/$x_g/bstate 2>/dev/null || echo -)
+      [ "$x_ip" != - ] && echo "EXIT $x_g $(cat $TSD/$x_g/route 2>/dev/null || echo fallback) $x_bs $x_ip"
+      [ "$x_sn" = 1 ] && echo "SUBNET $x_g $(group_field "$x_g" 4) $(cat $TSD/$x_g/subnetok 2>/dev/null || echo 0) $x_bs"
+    done < $ST/cfg/ts.conf
+  fi
   echo "HOSTAPD=$s_hp"
   echo "DHCP=$s_dp"
   echo "DAEMON=$s_da"
@@ -652,6 +1204,12 @@ case "$1" in
   start)  start "$2" ;;
   stop)   stop ;;
   status) status "$2" ;;
+  ts-install) ts_install "$2" "$3" ;;
+  ts-up)      ts_lock "$2"; ts_up "$2" "$3"; ts_info "$2"; ts_unlock "$2" ;;
+  ts-status)  ts_lock "$2"; ts_info "$2"; ts_unlock "$2" ;;
+  ts-down)    ts_lock "$2"; ts_down "$2"; ts_unlock "$2"; ts_idle; echo "OK" ;;
+  ts-logout)  ts_lock "$2"; ts_logout "$2" ;;
+  ts-gc)      ts_gc "$2" ;;
   daemon) daemon ;;
-  *) echo "usage: $0 start <cfgdir>|stop|status"; exit 2 ;;
+  *) echo "usage: $0 start <cfgdir>|stop|status|ts-install|ts-up|ts-status|ts-down|ts-logout|ts-gc"; exit 2 ;;
 esac

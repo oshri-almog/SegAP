@@ -4,6 +4,7 @@ object Validation {
 
     const val MAX_GROUPS = 8
     const val MAX_CLIENTS = 10 // Samsung's driver reports maxClient=10
+    private val TAILNET = Ipv4.parse("100.64.0.0")!!
 
     fun ssid(ssid: String): String? = when {
         ssid.isEmpty() -> "Network name is empty"
@@ -47,6 +48,17 @@ object Validation {
         if (g.leaseHours !in 1..168) errors += "Lease time must be 1-168 hours"
         if (!Ipv4.isValid(g.dns1)) errors += "DNS 1 is not a valid IPv4 address"
         if (g.dns2.isNotBlank() && !Ipv4.isValid(g.dns2)) errors += "DNS 2 is not a valid IPv4 address"
+        if (g.usesExitNode) {
+            val ip = Ipv4.parse(g.exitNodeIp)
+            if (ip == null || !Ipv4.inSubnet(ip, TAILNET, 10)) errors += "Exit node must be a Tailscale address (100.64.0.0/10)"
+            if (!g.internet) errors += "An exit node needs Internet access turned on"
+            // DNS must go through the exit node too: Tailscale DNS (100.100.100.100) would be answered by the phone's
+            // Tailscale app over the phone's own connection, and private addresses aren't forwarded to the exit node.
+            listOf(g.dns1, g.dns2).filter { it.isNotBlank() }.forEach { d ->
+                val a = Ipv4.parse(d)
+                if (a != null && !Ipv4.isPublic(a)) errors += "With an exit node, use public DNS servers (like 1.1.1.1): $d wouldn't go through it"
+            }
+        }
         return errors
     }
 

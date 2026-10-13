@@ -15,8 +15,8 @@ android {
         applicationId = "com.oshri.multihotspot"
         minSdk = 30
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
     }
 
     // The release key lives outside the repo. local.properties (not committed) may contain

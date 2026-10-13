@@ -6,9 +6,11 @@ import androidx.core.content.ContextCompat
 import com.oshri.multihotspot.data.ConfigStore
 import com.oshri.multihotspot.engine.Engine
 import com.oshri.multihotspot.engine.RootShell
+import com.oshri.multihotspot.engine.TailscalePackage
 import com.oshri.multihotspot.model.EngineState
 import com.oshri.multihotspot.model.EngineStatus
 import com.oshri.multihotspot.model.HotspotConfig
+import com.oshri.multihotspot.model.TailscaleInstance
 import com.oshri.multihotspot.model.Validation
 import com.oshri.multihotspot.service.HotspotService
 import kotlinx.coroutines.CoroutineScope
@@ -84,12 +86,19 @@ object HotspotController {
     suspend fun checkRoot(): Boolean = RootShell.isAvailable().also { _root.value = it }
 
     private val rates = com.oshri.multihotspot.model.RateTracker({ android.os.SystemClock.elapsedRealtime() })
+    private var tailscaleGcDone = false
 
     suspend fun refresh() {
         if (_root.value != true && !checkRoot()) return
         val raw = engine.status()
         val s = raw.copy(clients = rates.apply(raw.clients))
         _status.value = s
+        // Once per app process: an editor that was open when the app died can't stop the instance it started.
+        if (!tailscaleGcDone && s.state != EngineState.UNKNOWN) {
+            tailscaleGcDone = true
+            val known = _config.value.groups.map { it.id } + (appliedFile().takeIf { it.exists() }?.let { appliedStore.load() }?.groups?.map { it.id } ?: emptyList())
+            if (s.tailscaleVersion.isNotBlank()) engine.tailscaleGc(known.distinct())
+        }
         if (s.state == EngineState.RUNNING) {
             if (_applied.value == null) _applied.value = appliedFile().takeIf { it.exists() }?.let { appliedStore.load() }
             // The engine may run the last attempted config even though the app didn't see the start finish
@@ -164,6 +173,56 @@ object HotspotController {
     }
 
     suspend fun radioLog(): String = engine.hostapdLog()
+
+    // ---- Tailscale for exit nodes
+
+    /** Download/install of SegAP's Tailscale package; null = idle. */
+    data class TailscaleSetup(val message: String, val progress: Float? = null, val failed: Boolean = false)
+
+    private val _tailscaleSetup = MutableStateFlow<TailscaleSetup?>(null)
+    val tailscaleSetup: StateFlow<TailscaleSetup?> = _tailscaleSetup.asStateFlow()
+
+    fun installTailscaleAsync() {
+        if (_tailscaleSetup.value?.failed == false) return // already in progress
+        appScope.launch {
+            val v = TailscalePackage.VERSION
+            val tgz = File(appContext.cacheDir, "tailscale_${v}_arm64.tgz")
+            _tailscaleSetup.value = TailscaleSetup("Downloading Tailscale $v...", 0f)
+            val dl = TailscalePackage.download(tgz) { done, total ->
+                _tailscaleSetup.value = TailscaleSetup("Downloading Tailscale $v (${done / 1_048_576} of ${total / 1_048_576} MB)...", done.toFloat() / total)
+            }
+            if (dl.isFailure) {
+                _tailscaleSetup.value = TailscaleSetup("Download failed: ${dl.exceptionOrNull()?.message ?: "unknown error"}", failed = true)
+                return@launch
+            }
+            _tailscaleSetup.value = TailscaleSetup("Installing Tailscale $v...")
+            val r = engine.tailscaleInstall(tgz, TailscalePackage.SHA256)
+            tgz.delete()
+            _tailscaleSetup.value = if (r.isSuccess) null
+            else TailscaleSetup("Install failed: ${r.exceptionOrNull()?.message ?: "unknown error"}", failed = true)
+            refresh()
+        }
+    }
+
+    fun clearTailscaleSetupError() {
+        if (_tailscaleSetup.value?.failed == true) _tailscaleSetup.value = null
+    }
+
+    /** Starts the group's instance (and a login if needed); returns its state. */
+    suspend fun tailscaleUp(groupId: String, hostname: String): TailscaleInstance = engine.tailscaleUp(groupId, hostname)
+
+    suspend fun tailscaleStatus(groupId: String): TailscaleInstance = engine.tailscaleStatus(groupId)
+
+    /** Stops the group's instance unless the running hotspot uses it (it keeps its login). */
+    fun tailscaleReleaseAsync(groupId: String) {
+        val inUse = _status.value.state == EngineState.RUNNING && _applied.value?.group(groupId)?.hasTailscaleInstance == true
+        if (!inUse) appScope.launch { engine.tailscaleDown(groupId) }
+    }
+
+    /** Signs the group's instance out of the tailnet and forgets it (network deleted or signed out). */
+    fun tailscaleLogoutAsync(groupId: String) {
+        appScope.launch { engine.tailscaleLogout(groupId) }
+    }
 
     private fun appliedFile() = File(appContext.filesDir, "applied.json")
     private fun attemptedFile() = File(appContext.filesDir, "attempted.json")

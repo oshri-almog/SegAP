@@ -37,6 +37,16 @@ object Ipv4 {
         return a == 10L || (a == 172L && b in 16..31) || (a == 192L && b == 168L)
     }
 
+    /**
+     * Reachable through a Tailscale exit node: not private, CGNAT/tailnet (100.64/10), loopback, link-local,
+     * benchmark (198.18/15), multicast/reserved or 0/8 - the ranges SegAP's instances refuse to forward.
+     */
+    fun isPublic(ip: Long): Boolean {
+        val blocked = listOf("0.0.0.0" to 8, "10.0.0.0" to 8, "100.64.0.0" to 10, "127.0.0.0" to 8, "169.254.0.0" to 16,
+            "172.16.0.0" to 12, "192.168.0.0" to 16, "198.18.0.0" to 15, "224.0.0.0" to 3)
+        return blocked.none { (net, p) -> inSubnet(ip, parse(net)!!, p) }
+    }
+
     fun overlaps(a: Long, aPrefix: Int, b: Long, bPrefix: Int): Boolean {
         val p = minOf(aPrefix, bPrefix)
         return network(a, p) == network(b, p)

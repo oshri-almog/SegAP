@@ -4,8 +4,10 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -14,30 +16,22 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -49,53 +43,59 @@ import com.oshri.multihotspot.model.HotspotConfig
 import com.oshri.multihotspot.model.Mac
 import com.oshri.multihotspot.model.Validation
 import com.oshri.multihotspot.model.WifiMode
+import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+/** Tab 2: settings shared by all networks (Wi-Fi name, channel, radio). Edits are kept until Save or Discard. */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun SettingsScreen(onDone: () -> Unit) {
+fun HotspotTab(padding: PaddingValues) {
     val config by HotspotController.config.collectAsStateWithLifecycle()
-    var ssid by remember { mutableStateOf(config.ssid) }
-    var channel by remember { mutableStateOf(config.channel) }
-    var hidden by remember { mutableStateOf(config.hidden) }
-    var maxClients by remember { mutableFloatStateOf(config.maxClients.toFloat()) }
-    var wifiMode by remember { mutableStateOf(config.wifiMode) }
-    var iface by remember { mutableStateOf(config.iface) }
-    var strict by remember { mutableStateOf(config.strictIsolation) }
-    var bssid by remember { mutableStateOf(config.bssid) }
-    var blocked by remember { mutableStateOf(config.blockedMacs) }
-    var errors by remember { mutableStateOf<List<String>>(emptyList()) }
+    val status by HotspotController.status.collectAsStateWithLifecycle()
+    val snackbar = LocalSnackbar.current
+    val scope = rememberCoroutineScope()
+    var ssid by rememberSaveable { mutableStateOf(config.ssid) }
+    var channel by rememberSaveable { mutableIntStateOf(config.channel) }
+    var hidden by rememberSaveable { mutableStateOf(config.hidden) }
+    var maxClients by rememberSaveable { mutableIntStateOf(config.maxClients) }
+    var wifiMode by rememberSaveable { mutableStateOf(config.wifiMode) }
+    var iface by rememberSaveable { mutableStateOf(config.iface) }
+    var strict by rememberSaveable { mutableStateOf(config.strictIsolation) }
+    var bssid by rememberSaveable { mutableStateOf(config.bssid) }
+    var errors by rememberSaveable { mutableStateOf<List<String>>(emptyList()) }
+
+    fun edited(c: HotspotConfig) = c.copy(
+        ssid = ssid, channel = channel, hidden = hidden, maxClients = maxClients,
+        wifiMode = wifiMode, iface = iface, strictIsolation = strict, bssid = bssid,
+    )
+    val dirty = edited(config) != config
+
+    fun discard() {
+        ssid = config.ssid; channel = config.channel; hidden = config.hidden; maxClients = config.maxClients
+        wifiMode = config.wifiMode; iface = config.iface; strict = config.strictIsolation; bssid = config.bssid
+        errors = emptyList()
+    }
 
     fun save() {
         val e = mutableListOf<String>()
         Validation.ssid(ssid)?.let { e += it }
         if (iface == "wlan0" && wifiMode != WifiMode.OFF) e += "Using wlan0 for the hotspot requires turning the phone's Wi-Fi off"
-        if (e.isNotEmpty()) { errors = e; return }
-        HotspotController.updateConfig(
-            config.copy(
-                ssid = ssid, channel = channel, hidden = hidden, maxClients = maxClients.toInt(),
-                wifiMode = wifiMode, iface = iface, strictIsolation = strict, bssid = bssid, blockedMacs = blocked,
-            )
-        )
-        onDone()
+        errors = e
+        if (e.isNotEmpty()) return
+        HotspotController.updateConfig(edited(config))
+        scope.launch { snackbar.showSnackbar(savedMessage("Hotspot settings saved", status.state)) }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("Hotspot settings") },
-                navigationIcon = { IconButton(onClick = onDone) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") } },
-            )
-        },
-    ) { padding ->
+    Column(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding()) {
         Column(
-            Modifier.fillMaxSize().padding(padding).imePadding().verticalScroll(rememberScrollState()).padding(16.dp),
+            Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             if (errors.isNotEmpty()) MessageCard("Please fix", errors.joinToString("\n") { "• $it" }, error = true)
 
             OutlinedTextField(
                 value = ssid, onValueChange = { ssid = it }, label = { Text("Wi-Fi name (SSID)") }, singleLine = true,
-                supportingText = { Text("${ssid.toByteArray().size}/32 bytes") }, modifier = Modifier.fillMaxWidth(),
+                supportingText = { Text("${ssid.toByteArray().size}/32 bytes · shared by all networks") }, modifier = Modifier.fillMaxWidth(),
             )
             SwitchRow("Hidden network", "Don't broadcast the name; devices must type it in.", hidden) { hidden = it }
 
@@ -111,9 +111,9 @@ fun SettingsScreen(onDone: () -> Unit) {
                 }
             }
 
-            SectionLabel("Max devices: ${maxClients.toInt()}")
+            SectionLabel("Max devices: $maxClients")
             Slider(
-                value = maxClients, onValueChange = { maxClients = it },
+                value = maxClients.toFloat(), onValueChange = { maxClients = it.roundToInt() },
                 valueRange = 1f..Validation.MAX_CLIENTS.toFloat(), steps = Validation.MAX_CLIENTS - 2,
             )
 
@@ -132,18 +132,6 @@ fun SettingsScreen(onDone: () -> Unit) {
                 strict,
             ) { strict = it }
 
-            SectionLabel("Blocked devices")
-            if (blocked.isEmpty()) Text("None. Block a device from the connected devices list.", style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-            blocked.forEach { m ->
-                Card(Modifier.fillMaxWidth()) {
-                    Row(Modifier.padding(start = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text(m, fontFamily = FontFamily.Monospace, modifier = Modifier.weight(1f))
-                        IconButton(onClick = { blocked = blocked - m }) { Icon(Icons.Default.Delete, "Unblock") }
-                    }
-                }
-            }
-
             SectionLabel("Advanced")
             Text("Access point MAC (BSSID): $bssid", fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyMedium)
             OutlinedButton(onClick = { bssid = Mac.randomLocal() }) { Text("New random BSSID") }
@@ -151,13 +139,23 @@ fun SettingsScreen(onDone: () -> Unit) {
             RadioRow("swlan0 (recommended)", "Works alongside the phone's own Wi-Fi connection.", iface == "swlan0") { iface = "swlan0" }
             RadioRow("wlan0", "Only with the phone's Wi-Fi turned off.", iface == "wlan0") { iface = "wlan0"; wifiMode = WifiMode.OFF }
 
-            HorizontalDivider(Modifier.padding(vertical = 8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                "Saved settings take effect when you tap Apply changes (or at the next start).",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(16.dp))
+        }
+        // Sticky, so Save is reachable without scrolling to the end.
+        if (dirty) Surface(tonalElevation = 3.dp) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text("Unsaved changes", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                TextButton(onClick = { discard() }) { Text("Discard") }
                 Button(onClick = { save() }) { Text("Save") }
-                TextButton(onClick = onDone) { Text("Cancel") }
             }
-            Text("Changes take effect when you tap Apply changes (or next start).", style = MaterialTheme.typography.bodySmall)
-            Spacer(Modifier.height(32.dp))
         }
     }
 }

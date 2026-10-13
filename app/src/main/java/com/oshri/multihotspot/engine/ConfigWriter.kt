@@ -70,6 +70,17 @@ object ConfigWriter {
         }
     }
 
+    /**
+     * Groups with their own Tailscale instance: "GROUP EXIT_NODE_IP|- SHARE_SUBNET(0|1) HOSTNAME".
+     * An exit node only counts for groups with internet access.
+     */
+    fun tailscaleConf(c: HotspotConfig): String = buildString {
+        c.groups.forEach { g ->
+            val exit = g.exitNodeIp.takeIf { g.usesExitNode && g.internet } ?: "-"
+            if (exit != "-" || g.shareSubnet) appendLine("${g.id} $exit ${if (g.shareSubnet) 1 else 0} ${g.tailscaleHostname}")
+        }
+    }
+
     fun staticConf(c: HotspotConfig): String = buildString {
         c.staticLeases.forEach { l -> Mac.normalize(l.mac)?.let { appendLine("$it ${l.groupId} ${l.ip}") } }
     }
@@ -88,6 +99,7 @@ object ConfigWriter {
         File(dir, "groups.conf").writeText(groupsConf(c))
         File(dir, "static.conf").writeText(staticConf(c))
         if (c.blockedMacs.isNotEmpty()) File(dir, "deny.txt").writeText(denyFile(c))
+        tailscaleConf(c).takeIf { it.isNotEmpty() }?.let { File(dir, "ts.conf").writeText(it) }
     }
 
     private fun hex(s: String): String = s.toByteArray(Charsets.UTF_8).joinToString("") { "%02x".format(it.toInt() and 0xFF) }

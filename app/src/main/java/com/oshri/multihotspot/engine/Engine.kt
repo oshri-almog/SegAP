@@ -72,6 +72,53 @@ class Engine(private val context: Context) {
         return md.digest().joinToString("") { "%02x".format(it.toInt() and 0xFF) }
     }
 
+    // ---- Tailscale instances for exit nodes (one per group; see mh_engine.sh)
+
+    /** Installs the downloaded official package (the engine checks [sha256] again). Returns the version or an error. */
+    suspend fun tailscaleInstall(tgz: File, sha256: String): Result<String> {
+        installScript()
+        val r = RootShell.run("sh ${quote(script.absolutePath)} ts-install ${quote(tgz.absolutePath)} ${quote(sha256)}", 300_000)
+        val ok = r.output.lineSequence().firstOrNull { it.startsWith("OK ") }
+        return if (ok != null) Result.success(ok.removePrefix("OK ").trim())
+        else Result.failure(IllegalStateException(r.output.lineSequence().firstOrNull { it.startsWith("ERROR") }?.removePrefix("ERROR:")?.trim()
+            ?: r.output.takeLast(300).ifBlank { "install failed" }))
+    }
+
+    /** Starts the group's instance if needed (and a login if it isn't signed in), then reports its state. */
+    suspend fun tailscaleUp(groupId: String, hostname: String): com.oshri.multihotspot.model.TailscaleInstance {
+        installScript()
+        return com.oshri.multihotspot.model.TailscaleInstance.parse(
+            RootShell.run("sh ${quote(script.absolutePath)} ts-up ${quote(groupId)} ${quote(hostname)}", 90_000).output
+        )
+    }
+
+    suspend fun tailscaleStatus(groupId: String): com.oshri.multihotspot.model.TailscaleInstance {
+        installScript()
+        return com.oshri.multihotspot.model.TailscaleInstance.parse(
+            RootShell.run("sh ${quote(script.absolutePath)} ts-status ${quote(groupId)}", 30_000).output
+        )
+    }
+
+    suspend fun tailscaleDown(groupId: String) {
+        installScript()
+        RootShell.run("sh ${quote(script.absolutePath)} ts-down ${quote(groupId)}", 30_000)
+    }
+
+    /**
+     * Stops instances nothing needs any more (all of them while the hotspot is off), and signs out the ones of
+     * networks not in [knownGroupIds] (a new network that was never saved).
+     */
+    suspend fun tailscaleGc(knownGroupIds: Collection<String>) {
+        installScript()
+        RootShell.run("sh ${quote(script.absolutePath)} ts-gc ${quote(knownGroupIds.joinToString(","))}", 120_000)
+    }
+
+    /** Signs the group's instance out of the tailnet and deletes its state. */
+    suspend fun tailscaleLogout(groupId: String) {
+        installScript()
+        RootShell.run("sh ${quote(script.absolutePath)} ts-logout ${quote(groupId)}", 90_000)
+    }
+
     /** Last lines of hostapd's own log, for diagnosing start failures. */
     suspend fun hostapdLog(): String =
         RootShell.run("logcat -d -s hostapd:* | grep -i -E 'fail|error|invalid|not permitted|busy|AP-' | tail -n 12", 15_000).output

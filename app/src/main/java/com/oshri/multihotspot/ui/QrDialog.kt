@@ -53,24 +53,34 @@ fun qrBitmap(content: String, sizePx: Int = 720): Bitmap {
 }
 
 @Composable
-fun WifiQrDialog(ssid: String, networkName: String, password: String, hidden: Boolean, onDismiss: () -> Unit) {
-    val bitmap = remember(ssid, password, hidden) { qrBitmap(wifiQrPayload(ssid, password, hidden)).asImageBitmap() }
+fun WifiQrDialog(ssid: String, networkName: String, password: String, hidden: Boolean, onDismiss: () -> Unit) =
+    QrDialog(
+        title = "Join $networkName",
+        content = wifiQrPayload(ssid, password, hidden),
+        description = "QR code to join $ssid as $networkName",
+        caption = "Scan with the phone's camera to join \"$ssid\". The device lands in $networkName.",
+        onDismiss = onDismiss,
+    )
+
+@Composable
+fun QrDialog(title: String, content: String, description: String, caption: String, onDismiss: () -> Unit) {
+    val bitmap = remember(content) { qrBitmap(content).asImageBitmap() }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Join $networkName") },
+        title = { Text(title) },
         text = {
             Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 // Always black-on-white with a quiet zone, so cameras read it in dark mode too.
                 Box(Modifier.background(Color.White, RoundedCornerShape(12.dp)).padding(12.dp)) {
                     Image(
                         bitmap = bitmap,
-                        contentDescription = "QR code to join $ssid as $networkName",
+                        contentDescription = description,
                         filterQuality = FilterQuality.None,
                         modifier = Modifier.size(240.dp),
                     )
                 }
                 Text(
-                    "Scan with the phone's camera to join \"$ssid\". The device lands in $networkName.",
+                    caption,
                     style = MaterialTheme.typography.bodyMedium,
                     textAlign = TextAlign.Center,
                     modifier = Modifier.fillMaxWidth(),

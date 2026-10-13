@@ -38,6 +38,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -81,9 +82,27 @@ fun GroupEditScreen(groupId: String?, onDone: () -> Unit) {
     var dns1 by remember { mutableStateOf(original.dns1) }
     var dns2 by remember { mutableStateOf(original.dns2) }
     var leases by remember { mutableStateOf(config.staticLeases.filter { it.groupId == original.id }) }
+    var useExit by remember { mutableStateOf(original.usesExitNode) }
+    var exitIp by remember { mutableStateOf(original.exitNodeIp) }
+    var exitName by remember { mutableStateOf(original.exitNodeName) }
+    var shareSubnet by remember { mutableStateOf(original.shareSubnet) }
     var errors by remember { mutableStateOf<List<String>>(emptyList()) }
     var confirmDelete by remember { mutableStateOf(false) }
     var addLease by remember { mutableStateOf(false) }
+
+    // The exit-node section starts this network's Tailscale instance. When leaving: a new network that was never
+    // saved signs it out again (it would be a stray device in the tailnet); otherwise it's stopped, unless the
+    // running hotspot uses it. Its login is kept.
+    var instanceUsed by remember { mutableStateOf(false) }
+    var saved by remember { mutableStateOf(false) }
+    DisposableEffect(Unit) {
+        onDispose {
+            if (instanceUsed) {
+                if (isNew && !saved) HotspotController.tailscaleLogoutAsync(original.id)
+                else HotspotController.tailscaleReleaseAsync(original.id)
+            }
+        }
+    }
 
     /** Keeps the DHCP range inside the subnet when the gateway or prefix changes. */
     fun syncRange(gw: String, pfx: String) {
@@ -105,10 +124,17 @@ fun GroupEditScreen(groupId: String?, onDone: () -> Unit) {
         dns1 = dns1.trim(), dns2 = dns2.trim(), tailscale = tailscale,
         // Keep the user's order of networks, drop ones that were deleted meanwhile.
         canReach = config.groups.map { it.id }.filter { it in reach && it != original.id },
+        exitNodeIp = if (useExit) exitIp else "",
+        exitNodeName = if (useExit) exitName else "",
+        shareSubnet = shareSubnet,
     )
 
     fun save() {
         val g = build()
+        if (useExit && exitIp.isBlank()) {
+            errors = listOf("Pick an exit node, or turn off \"Use a Tailscale exit node\"")
+            return
+        }
         val groupErrors = Validation.group(g)
         if (groupErrors.isNotEmpty()) { errors = groupErrors; return }
         val groups = if (isNew) config.groups + g else config.groups.map { if (it.id == g.id) g else it }
@@ -120,6 +146,7 @@ fun GroupEditScreen(groupId: String?, onDone: () -> Unit) {
         val all = Validation.config(candidate).filter { it.contains(g.name) || it.startsWith("Fixed IP") || it.startsWith("Device") }
         if (all.isNotEmpty()) { errors = all; return }
         HotspotController.updateConfig(candidate)
+        saved = true
         onDone()
     }
 
@@ -216,6 +243,21 @@ fun GroupEditScreen(groupId: String?, onDone: () -> Unit) {
                 }
             }
 
+            TailscaleSection(
+                groupId = original.id,
+                hostname = build().tailscaleHostname,
+                subnet = build().networkCidr,
+                internet = internet,
+                exitEnabled = useExit,
+                onExitEnabledChange = { useExit = it },
+                selectedIp = exitIp,
+                selectedName = exitName,
+                onSelect = { n -> exitIp = n?.ip ?: ""; exitName = n?.name ?: "" },
+                shareSubnet = shareSubnet,
+                onShareSubnetChange = { shareSubnet = it },
+                onInstanceUsed = { instanceUsed = true },
+            )
+
             SectionLabel("Access to other networks")
             val others = config.groups.filter { it.id != original.id }
             if (others.isEmpty()) {
@@ -245,7 +287,7 @@ fun GroupEditScreen(groupId: String?, onDone: () -> Unit) {
             }
 
             SectionLabel("Fixed IPs in this network")
-            if (leases.isEmpty()) Text("None. You can also add one from the device list on the main screen.",
+            if (leases.isEmpty()) Text("None. You can also add one from the Status or Fixed IPs tab.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             leases.forEach { l ->
                 Card(Modifier.fillMaxWidth()) {
@@ -282,6 +324,9 @@ fun GroupEditScreen(groupId: String?, onDone: () -> Unit) {
                         staticLeases = config.staticLeases.filter { it.groupId != original.id },
                     )
                 )
+                // Its Tailscale instance (if it ever had one) leaves the tailnet.
+                HotspotController.tailscaleLogoutAsync(original.id)
+                instanceUsed = false
                 confirmDelete = false
                 onDone()
             }) { Text("Delete") }
