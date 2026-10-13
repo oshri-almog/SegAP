@@ -231,7 +231,7 @@ fun GroupEditScreen(groupId: String?, onDone: () -> Unit) {
                 ) { seeEachOther = it }
             }
             if (caps.firewall) Text(
-                if (config.strictIsolation) "Devices in different networks can never reach each other."
+                if (config.strictIsolation) "Devices in different networks can't reach each other, except as allowed under Access to other networks below."
                 else "Strict isolation is OFF in Settings: all devices on all passwords can reach each other directly, and this switch has no effect.",
                 style = MaterialTheme.typography.bodySmall,
                 color = if (config.strictIsolation) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,

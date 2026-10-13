@@ -106,7 +106,7 @@ fun HotspotTab(padding: PaddingValues) {
             )
             SwitchRow("Hidden network", "Don't broadcast the name; devices must type it in.", hidden) { hidden = it }
 
-            // Only the phone's own hotspot (Shizuku) can use 5 GHz: SegAP's access point (root) is limited by the firmware.
+            // Only the phone's own hotspot (Shizuku) can use 5 GHz: SegAP's access point (root) is 2.4 GHz only (5 GHz was refused when tested).
             // Also while 5 GHz is chosen but not offered (any more): it must stay possible to switch back.
             if (shizuku && (caps.band5GHz || band5)) {
                 SectionLabel("Band")
@@ -134,7 +134,7 @@ fun HotspotTab(padding: PaddingValues) {
                 Text(
                     "Channel $channel · ${channelFrequency(channel)} MHz. 1, 6 and 11 don't overlap each other. " +
                         when {
-                            !shizuku -> "5 GHz isn't available: the phone's Wi-Fi firmware doesn't allow a 5 GHz hotspot in your country."
+                            !shizuku -> "SegAP's own access point uses 2.4 GHz (5 GHz was refused when tested); the Shizuku engine can run the phone's own hotspot on 5 GHz where the phone allows it."
                             caps.band5GHz -> ""
                             status.phoneHotspot == null -> ""
                             else -> "This phone's hotspot doesn't offer 5 GHz here."
