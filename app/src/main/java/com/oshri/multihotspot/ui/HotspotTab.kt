@@ -235,7 +235,7 @@ fun HotspotTab(padding: PaddingValues) {
                 }
                 RadioRow(
                     "Hardware",
-                    "The address the Wi-Fi chip itself gives the hotspot (not the phone's own Wi-Fi MAC, which would confuse the driver).",
+                    "The address the Wi-Fi chip itself gives the hotspot (not the phone's own Wi-Fi MAC, which would confuse the driver). SegAP learns it at the first start after the phone restarts.",
                     macMode == MacMode.HARDWARE,
                 ) { macMode = MacMode.HARDWARE }
                 Text(

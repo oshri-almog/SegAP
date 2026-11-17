@@ -36,7 +36,8 @@ Without root, SegAP can still run the phone's own hotspot with one network throu
   - **transmit power** limit (maximum, 17, 14, 11, 8 or 5 dBm) through the Broadcom driver — a limit for the whole
     Wi-Fi radio while the hotspot runs, never above the legal maximum, removed when it stops;
   - **access point MAC**: a random address SegAP keeps (or a new one), or the hotspot interface's own hardware MAC (the one the Wi-Fi driver assigns; not the phone's
-    client MAC - using that confused the S10's driver until a reboot).
+    client MAC - using that confused the S10's driver until a reboot). SegAP learns it at the first hotspot start
+    after the phone restarts; until then it keeps the interface's current address.
 - **Fixed IPs** per device, **block** devices.
 - **QR code** per network — scan to join with that network's password.
 - **Connected devices**: signal strength in dBm with animated bars, live download/upload rate,
