@@ -41,6 +41,14 @@ fail() { log "ERROR: $*"; echo "ERROR: $*"; echo failed > $ST/state; echo "$*" >
 
 cfg() { sed -n "s/^$1=//p" $ST/cfg/engine.conf 2>/dev/null | head -1; }
 
+# The radio helper (libmhwl.so). Its path changes when the app is updated, so the one recorded at start may be
+# gone by the time the hotspot stops: then look for the installed app's copy.
+wl_helper() {
+  wh_w=$(cfg WL_HELPER)
+  [ -x "$wh_w" ] || wh_w=$(ls /data/app/*/com.oshri.multihotspot*/lib/arm64/libmhwl.so 2>/dev/null | head -1)
+  [ -x "$wh_w" ] && echo "$wh_w"
+}
+
 is_mac() { echo "$1" | grep -qiE '^([0-9a-f]{2}:){5}[0-9a-f]{2}$'; }
 
 # pid exists AND its command line contains $2. Pid files survive reboots: never signal a recycled pid.
@@ -953,6 +961,7 @@ watchdog() {
       log "hostapd died - cleaning up: $w_reason"
       # Clean up once (firewall, DHCP, routes, Wi-Fi-off) and leave the radio to whoever has it now.
       net_teardown soft
+      restore_sta_role "$IF"
       restore_wifi
       reset_txpower
       echo failed > $ST/state
@@ -995,6 +1004,20 @@ daemon() {
     done
     sleep 1
   done
+}
+
+# hostapd on wlan0 (the phone's own Wi-Fi interface) leaves the driver's wlan0 in access-point role when it
+# exits - this vendor hostapd doesn't switch it back - and the phone's Wi-Fi then can't connect to any network
+# ("wpaie set error (-7)" = not a station) until a reboot. nl80211 already reports "station", so setting
+# that alone changes nothing: flip to AP and back so the driver re-applies the client role.
+restore_sta_role() {
+  [ "$1" = wlan0 ] || return 0
+  rs_n=0; while [ -n "$(hostapd_pid)" ] && [ $rs_n -lt 10 ]; do sleep 0.3; rs_n=$((rs_n+1)); done
+  rs_w=$(wl_helper)
+  [ -x "$rs_w" ] || { log "can't put wlan0 back in client mode: no radio helper"; return 0; }
+  ip link set wlan0 up 2>/dev/null
+  "$rs_w" -t wlan0 ap >/dev/null 2>&1
+  if "$rs_w" -t wlan0 station >/dev/null 2>&1; then log "wlan0 back in client mode"; else log "couldn't put wlan0 back in client mode"; fi
 }
 
 kill_engine_procs() {
@@ -1142,11 +1165,11 @@ hw_mac() {
 # Transmit power limit (TXPOWER dBm, via the firmware's "qtxpower" in quarter dBm). It is a limit, never above
 # the regulatory maximum, and applies to the whole radio (the phone's own Wi-Fi too) - so it's undone on stop.
 set_txpower() {
-  tp_w=$(cfg WL_HELPER); tp_p=$(cfg TXPOWER)
+  tp_w=$(wl_helper); tp_p=$(cfg TXPOWER)
   [ -n "$tp_w" ] && [ -x "$tp_w" ] || { [ -n "$tp_p" ] && log "transmit power: no radio helper on this phone"; return 0; }
   if [ -n "$tp_p" ] && [ "$tp_p" != 0 ]; then
     if "$tp_w" -s $1 qtxpower $((tp_p * 4)) >/dev/null 2>&1; then
-      echo "$tp_w $1" > $ST/txpower_set; log "transmit power limited to ${tp_p} dBm"
+      echo "$1" > $ST/txpower_set; log "transmit power limited to ${tp_p} dBm"
     else
       log "transmit power: the driver refused the limit"
     fi
@@ -1158,7 +1181,7 @@ set_txpower() {
 # The driver may drop the limit (radio reset, channel change): put it back.
 keep_txpower() {
   [ -f $ST/txpower_set ] || return 0
-  kt_p=$(cfg TXPOWER); read -r kt_w kt_if < $ST/txpower_set
+  kt_p=$(cfg TXPOWER); kt_w=$(wl_helper)
   kt_v=$("$kt_w" -g $1 qtxpower 2>/dev/null | awk '{print $2}')
   [ -n "$kt_v" ] && [ -n "$kt_p" ] || return 0
   if [ $(( kt_v & 0x7fffffff )) != $(( kt_p * 4 )) ] && "$kt_w" -s $1 qtxpower $(( kt_p * 4 )) >/dev/null 2>&1; then
@@ -1169,7 +1192,7 @@ keep_txpower() {
 # Back to no limit (127 = maximum) if SegAP set one.
 reset_txpower() {
   [ -f $ST/txpower_set ] || return 0
-  read -r rt_w rt_if < $ST/txpower_set
+  rt_w=$(wl_helper); read -r rt_a rt_b < $ST/txpower_set; rt_if=${rt_b:-$rt_a}   # older files: "<helper> <iface>"
   for rt_i in $rt_if wlan0; do
     [ -d /sys/class/net/$rt_i ] && [ -x "$rt_w" ] && "$rt_w" -s $rt_i qtxpower 127 >/dev/null 2>&1 && { log "transmit power limit removed"; break; }
   done
@@ -1182,6 +1205,7 @@ stop() {
   # First, while the interface is still up (the driver refuses it once it's down). A restart sets it again.
   reset_txpower
   kill_engine_procs
+  restore_sta_role "$(cfg IFACE)"
   net_teardown
   [ "$1" = keepwifi ] || restore_wifi
   echo stopped > $ST/state; rm -f $ST/reason $ST/boot_id
@@ -1230,7 +1254,7 @@ status() {
   # iptables prints the match as "MACaa:bb:..." (some builds: "MAC aa:bb:...").
   $IPT -L mh_SRC -v -x -n 2>/dev/null | awk '$3=="RETURN" {for(i=1;i<=NF;i++) if($i ~ /^MAC/) {m=substr($i,4); if(m=="") m=$(i+1); print tolower(m), $2}}' > $s_bt
   # Radio stats (RSSI, byte counters, link rates) from the driver via the native helper, if present.
-  s_wl=${1:-$(cfg WL_HELPER)}   # the app passes the current path (it moves when the app is updated)
+  s_wl=${1:-$(wl_helper)}   # the app passes the current path (it moves when the app is updated)
   : > $s_st
   # Channel width actually in use (chanspec bandwidth bits) and the transmit power limit (quarter dBm, 127 = none).
   if [ "$s_state" = running ] && [ -n "$s_wl" ] && [ -x "$s_wl" ]; then

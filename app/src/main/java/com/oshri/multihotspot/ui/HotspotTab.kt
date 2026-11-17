@@ -244,8 +244,17 @@ fun HotspotTab(padding: PaddingValues) {
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Text("Radio interface", style = MaterialTheme.typography.bodyLarge)
-                RadioRow("swlan0 (recommended)", "Works alongside the phone's own Wi-Fi connection.", iface == "swlan0") { iface = "swlan0" }
-                RadioRow("wlan0", "Only with the phone's Wi-Fi turned off.", iface == "wlan0") { iface = "wlan0"; wifiMode = WifiMode.OFF }
+                RadioRow("swlan0 (recommended)", "Works alongside the phone's own Wi-Fi connection.", iface == "swlan0") {
+                    // wlan0 forced "Turn Wi-Fi off"; coming back, the phone may keep its Wi-Fi again.
+                    if (iface == "wlan0") wifiMode = WifiMode.KEEP
+                    iface = "swlan0"
+                }
+                RadioRow(
+                    "wlan0 (not recommended)",
+                    "Uses the phone's own Wi-Fi interface, so the phone's Wi-Fi is off meanwhile. When the hotspot stops, " +
+                        "SegAP switches the interface back to normal Wi-Fi.",
+                    iface == "wlan0",
+                ) { iface = "wlan0"; wifiMode = WifiMode.OFF }
             }
 
             Text(

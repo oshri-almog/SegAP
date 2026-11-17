@@ -12,6 +12,9 @@
  *        mhwl -x <iface> <mac>                 hex dump of the raw record (layout debugging)
  *        mhwl -g <iface> <iovar>               integer firmware variable, e.g. qtxpower (quarter dBm), chanspec
  *        mhwl -s <iface> <iovar> <value>       set it (the engine's transmit power limit uses qtxpower)
+ *        mhwl -t <iface>                       interface type (nl80211): "station", "ap" or the number
+ *        mhwl -t <iface> station|ap            set it - hostapd on wlan0 leaves it "ap" when it exits, and the
+ *                                              phone's Wi-Fi then can't connect until it is set back
  */
 #include <errno.h>
 #include <net/if.h>
@@ -23,6 +26,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <linux/sockios.h>
+#include <linux/netlink.h>
+#include <linux/genetlink.h>
 
 #define WLC_GET_VAR 262
 #define WLC_SET_VAR 263
@@ -121,7 +126,119 @@ static int iovar_int(int fd, const char *ifname, const char *name, int set, int3
     return 0;
 }
 
+/* ---- nl80211 over generic netlink (the phone has no iw) ---- */
+
+#define NL80211_CMD_GET_INTERFACE 5
+#define NL80211_CMD_SET_INTERFACE 6
+#define NL80211_ATTR_IFINDEX 3
+#define NL80211_ATTR_IFTYPE 5
+#define NL80211_IFTYPE_STATION 2
+#define NL80211_IFTYPE_AP 3
+
+static void put_attr(char *msg, int *len, uint16_t type, const void *data, uint16_t dlen) {
+    struct nlattr *a = (struct nlattr *)(msg + *len);
+    a->nla_type = type;
+    a->nla_len = NLA_HDRLEN + dlen;
+    memcpy((char *)a + NLA_HDRLEN, data, dlen);
+    *len += NLA_ALIGN(a->nla_len);
+}
+
+/* Sends one request; returns the reply length (or -errno). An ack/error reply's code is in *err. */
+static int genl_call(int fd, char *msg, int len, char *rep, int rlen, int *err) {
+    struct sockaddr_nl to;
+    memset(&to, 0, sizeof(to));
+    to.nl_family = AF_NETLINK;
+    if (sendto(fd, msg, len, 0, (struct sockaddr *)&to, sizeof(to)) < 0) return -errno;
+    int n = recv(fd, rep, rlen, 0);
+    if (n < 0) return -errno;
+    struct nlmsghdr *h = (struct nlmsghdr *)rep;
+    *err = (h->nlmsg_type == NLMSG_ERROR) ? ((struct nlmsgerr *)NLMSG_DATA(h))->error : 0;
+    return n;
+}
+
+/* Value of attribute [type] in a generic netlink reply, or NULL. */
+static const char *find_attr(const char *rep, uint16_t type, int *alen) {
+    const struct nlmsghdr *h = (const struct nlmsghdr *)rep;
+    const char *p = (const char *)NLMSG_DATA(h) + GENL_HDRLEN;
+    int rem = (int)h->nlmsg_len - NLMSG_HDRLEN - GENL_HDRLEN;
+    while (rem >= NLA_HDRLEN) {
+        const struct nlattr *a = (const struct nlattr *)p;
+        if (a->nla_len < NLA_HDRLEN || a->nla_len > rem) break;
+        if ((a->nla_type & NLA_TYPE_MASK) == type) { *alen = a->nla_len - NLA_HDRLEN; return p + NLA_HDRLEN; }
+        p += NLA_ALIGN(a->nla_len);
+        rem -= NLA_ALIGN(a->nla_len);
+    }
+    return NULL;
+}
+
+static int nl80211_family(int fd) {
+    char msg[128], rep[4096];
+    memset(msg, 0, sizeof(msg));
+    int len = NLMSG_HDRLEN + GENL_HDRLEN, err = 0;
+    struct nlmsghdr *h = (struct nlmsghdr *)msg;
+    struct genlmsghdr *g = (struct genlmsghdr *)NLMSG_DATA(h);
+    h->nlmsg_type = GENL_ID_CTRL;
+    h->nlmsg_flags = NLM_F_REQUEST;
+    h->nlmsg_seq = 1;
+    g->cmd = CTRL_CMD_GETFAMILY;
+    g->version = 1;
+    put_attr(msg, &len, CTRL_ATTR_FAMILY_NAME, "nl80211", 8);
+    h->nlmsg_len = len;
+    int n = genl_call(fd, msg, len, rep, sizeof(rep), &err);
+    if (n < 0) return n;
+    if (err) return err;
+    int alen;
+    const char *v = find_attr(rep, CTRL_ATTR_FAMILY_ID, &alen);
+    return (v && alen >= 2) ? *(const uint16_t *)v : -ENOENT;
+}
+
+/* Gets (type < 0) or sets the nl80211 interface type; prints the type when getting. */
+static int iftype(const char *ifname, int type) {
+    uint32_t idx = if_nametoindex(ifname);
+    if (!idx) { printf("ERR iftype no-such-interface\n"); return 1; }
+    int fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_GENERIC);
+    if (fd < 0) { perror("socket"); return 1; }
+    struct sockaddr_nl me;
+    memset(&me, 0, sizeof(me));
+    me.nl_family = AF_NETLINK;
+    if (bind(fd, (struct sockaddr *)&me, sizeof(me)) < 0) { perror("bind"); close(fd); return 1; }
+    int fam = nl80211_family(fd);
+    if (fam < 0) { printf("ERR iftype nl80211-%d\n", -fam); close(fd); return 1; }
+
+    char msg[128], rep[8192];
+    memset(msg, 0, sizeof(msg));
+    int len = NLMSG_HDRLEN + GENL_HDRLEN, err = 0;
+    struct nlmsghdr *h = (struct nlmsghdr *)msg;
+    struct genlmsghdr *g = (struct genlmsghdr *)NLMSG_DATA(h);
+    h->nlmsg_type = (uint16_t)fam;
+    h->nlmsg_flags = NLM_F_REQUEST | (type >= 0 ? NLM_F_ACK : 0);
+    h->nlmsg_seq = 2;
+    g->cmd = type >= 0 ? NL80211_CMD_SET_INTERFACE : NL80211_CMD_GET_INTERFACE;
+    put_attr(msg, &len, NL80211_ATTR_IFINDEX, &idx, 4);
+    if (type >= 0) { uint32_t t = (uint32_t)type; put_attr(msg, &len, NL80211_ATTR_IFTYPE, &t, 4); }
+    h->nlmsg_len = len;
+    int n = genl_call(fd, msg, len, rep, sizeof(rep), &err);
+    close(fd);
+    if (n < 0 || err) { printf("ERR iftype %d\n", n < 0 ? -n : -err); return 1; }
+    if (type >= 0) return 0;
+    int alen;
+    const char *v = find_attr(rep, NL80211_ATTR_IFTYPE, &alen);
+    if (!v || alen < 4) { printf("ERR iftype no-type\n"); return 1; }
+    uint32_t t = *(const uint32_t *)v;
+    if (t == NL80211_IFTYPE_STATION) printf("station\n");
+    else if (t == NL80211_IFTYPE_AP) printf("ap\n");
+    else printf("%u\n", t);
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc >= 3 && strcmp(argv[1], "-t") == 0) {
+        if (argc == 3) return iftype(argv[2], -1);
+        if (strcmp(argv[3], "station") == 0) return iftype(argv[2], NL80211_IFTYPE_STATION);
+        if (strcmp(argv[3], "ap") == 0) return iftype(argv[2], NL80211_IFTYPE_AP);
+        fprintf(stderr, "usage: mhwl -t <iface> [station|ap]\n");
+        return 2;
+    }
     /* mhwl -g <iface> <iovar>          prints the integer value (e.g. qtxpower, chanspec)
      * mhwl -s <iface> <iovar> <value>  sets it */
     if (argc >= 4 && (strcmp(argv[1], "-g") == 0 || strcmp(argv[1], "-s") == 0)) {
