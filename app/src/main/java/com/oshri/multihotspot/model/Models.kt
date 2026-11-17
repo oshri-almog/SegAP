@@ -70,6 +70,9 @@ data class StaticLease(
 
 enum class WifiMode { KEEP, OFF }
 
+/** The access point's MAC (BSSID): a random one SegAP keeps (HotspotConfig.bssid), or the phone's own. */
+enum class MacMode { RANDOM, HARDWARE }
+
 data class HotspotConfig(
     val ssid: String,
     val channel: Int,
@@ -87,6 +90,11 @@ data class HotspotConfig(
     val band5: Boolean = false,
     /** 5 GHz channel, 0 = let the phone choose. */
     val channel5: Int = 0,
+    /** Transmit power limit in dBm; 0 = no limit (the legal maximum). Root engine; applies to the whole radio. */
+    val txPower: Int = 0,
+    /** 40 MHz channel width on 2.4 GHz (only where no neighbouring network overlaps; else 20 MHz). Root engine. */
+    val bandwidth40: Boolean = false,
+    val macMode: MacMode = MacMode.RANDOM,
     /**
      * Saved sets of hotspot settings (name, channel, radio...); the fields above are always the [activeProfile]'s
      * (see [syncedProfiles]). Empty only in configs from before profiles.
@@ -106,6 +114,8 @@ data class HotspotConfig(
         val CHANNELS_24GHZ = (1..13).toList()
         /** Non-DFS 5 GHz channels (DFS channels make the hotspot wait for radar checks or move). */
         val CHANNELS_5GHZ = listOf(36, 40, 44, 48, 149, 153, 157, 161, 165)
+        /** Transmit power limits offered (dBm); 0 = no limit. */
+        val TX_POWERS = listOf(17, 14, 11, 8, 5)
 
         fun default(): HotspotConfig = HotspotConfig(
             ssid = "S10-Hotspot",
@@ -143,18 +153,25 @@ data class HotspotProfile(
     val strictIsolation: Boolean = true,
     val band5: Boolean = false,
     val channel5: Int = 0,
+    /** Transmit power limit in dBm; 0 = no limit (the legal maximum). Root engine; applies to the whole radio. */
+    val txPower: Int = 0,
+    /** 40 MHz channel width on 2.4 GHz (only where no neighbouring network overlaps; else 20 MHz). Root engine. */
+    val bandwidth40: Boolean = false,
+    val macMode: MacMode = MacMode.RANDOM,
 )
 
 /** The current hotspot settings as profile [id] / [name]. */
 fun HotspotConfig.asProfile(id: String, name: String) = HotspotProfile(
     id = id, name = name, ssid = ssid, channel = channel, hidden = hidden, maxClients = maxClients, bssid = bssid,
     iface = iface, wifiMode = wifiMode, strictIsolation = strictIsolation, band5 = band5, channel5 = channel5,
+    txPower = txPower, bandwidth40 = bandwidth40, macMode = macMode,
 )
 
 /** The config with [p]'s hotspot settings in effect. */
 fun HotspotConfig.withSettingsOf(p: HotspotProfile) = copy(
     ssid = p.ssid, channel = p.channel, hidden = p.hidden, maxClients = p.maxClients, bssid = p.bssid, iface = p.iface,
     wifiMode = p.wifiMode, strictIsolation = p.strictIsolation, band5 = p.band5, channel5 = p.channel5,
+    txPower = p.txPower, bandwidth40 = p.bandwidth40, macMode = p.macMode,
     activeProfile = p.id,
 )
 
@@ -212,6 +229,7 @@ fun HotspotConfig.shizukuView(): HotspotConfig = active().copy(
             devicesSeeEachOther = g.devicesSeeEachOther)
     },
     staticLeases = emptyList(), bssid = "", iface = "", wifiMode = WifiMode.KEEP, strictIsolation = true,
+    txPower = 0, bandwidth40 = false, macMode = MacMode.RANDOM,
     channel = if (band5) 0 else channel, channel5 = if (band5) channel5 else 0,
     blockedMacs = blockedMacs.map { it.lowercase() }.sorted(),
 )
@@ -285,6 +303,10 @@ data class EngineStatus(
     val subnets: List<SubnetStatus> = emptyList(),
     /** Frequency the hotspot runs on (MHz; Shizuku engine only, 0 = unknown). */
     val frequencyMhz: Int = 0,
+    /** Channel width in use, from the driver (root engine); 0 = unknown. */
+    val bandwidthMhz: Int = 0,
+    /** Transmit power limit in effect (dBm), from the driver; 0 = none; null = unknown. */
+    val txPowerDbm: Int? = null,
     /** What the phone's own hotspot supports (Shizuku engine only; null with root). */
     val phoneHotspot: PhoneHotspotSupport? = null,
     /** [ShizukuConfigPrint] of the phone hotspot's live settings (Shizuku engine only). */
@@ -358,6 +380,8 @@ data class EngineStatus(
                             "DAEMON" -> s.copy(daemonAlive = v == "1")
                             "TSBIN" -> s.copy(tailscaleVersion = v)
                             "FREQ" -> s.copy(frequencyMhz = v.toIntOrNull() ?: 0)
+                            "CHANBW" -> s.copy(bandwidthMhz = v.toIntOrNull() ?: 0)
+                            "TXPWR" -> s.copy(txPowerDbm = v.toIntOrNull())
                             "SHZ_CONF" -> s.copy(liveConfigPrint = v)
                             "SHZ_MAXCLIENTS" -> s.copy(phoneHotspot = (s.phoneHotspot ?: PhoneHotspotSupport()).copy(maxClients = v == "1"))
                             "SHZ_BLOCK" -> s.copy(phoneHotspot = (s.phoneHotspot ?: PhoneHotspotSupport()).copy(blocking = v == "1"))

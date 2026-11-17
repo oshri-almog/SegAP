@@ -43,6 +43,7 @@ import com.oshri.multihotspot.engine.BackendKind
 import com.oshri.multihotspot.model.EngineState
 import com.oshri.multihotspot.model.HotspotConfig
 import com.oshri.multihotspot.model.Mac
+import com.oshri.multihotspot.model.MacMode
 import com.oshri.multihotspot.model.Validation
 import com.oshri.multihotspot.model.WifiMode
 import kotlinx.coroutines.launch
@@ -74,11 +75,15 @@ fun HotspotTab(padding: PaddingValues) {
     var iface by rememberSaveable(config.activeProfile) { mutableStateOf(config.iface) }
     var strict by rememberSaveable(config.activeProfile) { mutableStateOf(config.strictIsolation) }
     var bssid by rememberSaveable(config.activeProfile) { mutableStateOf(config.bssid) }
+    var txPower by rememberSaveable(config.activeProfile) { mutableIntStateOf(config.txPower) }
+    var bandwidth40 by rememberSaveable(config.activeProfile) { mutableStateOf(config.bandwidth40) }
+    var macMode by rememberSaveable(config.activeProfile) { mutableStateOf(config.macMode) }
     var errors by rememberSaveable(config.activeProfile) { mutableStateOf<List<String>>(emptyList()) }
 
     fun edited(c: HotspotConfig) = c.copy(
         ssid = ssid, channel = channel, band5 = band5, channel5 = channel5, hidden = hidden, maxClients = maxClients,
         wifiMode = wifiMode, iface = iface, strictIsolation = strict, bssid = bssid,
+        txPower = txPower, bandwidth40 = bandwidth40, macMode = macMode,
     )
     val dirty = edited(config) != config
 
@@ -86,6 +91,7 @@ fun HotspotTab(padding: PaddingValues) {
         ssid = config.ssid; channel = config.channel; band5 = config.band5; channel5 = config.channel5
         hidden = config.hidden; maxClients = config.maxClients
         wifiMode = config.wifiMode; iface = config.iface; strict = config.strictIsolation; bssid = config.bssid
+        txPower = config.txPower; bandwidth40 = config.bandwidth40; macMode = config.macMode
         errors = emptyList()
     }
 
@@ -156,6 +162,35 @@ fun HotspotTab(padding: PaddingValues) {
                 }
             }
 
+            Gated(caps.radioDetails) {
+                SectionLabel("Channel width")
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    FilterChip(selected = !bandwidth40, onClick = { bandwidth40 = false }, label = { Text("20 MHz") })
+                    FilterChip(selected = bandwidth40, onClick = { bandwidth40 = true }, label = { Text("40 MHz") })
+                }
+                Text(
+                    if (bandwidth40) "Up to twice as fast, but the 2.4 GHz band has room for only one such channel. Wi-Fi's " +
+                        "rules allow 40 MHz only when no neighbouring network overlaps it - otherwise the hotspot uses 20 MHz. " +
+                        "The Status tab shows the width actually in use."
+                    else "20 MHz: the most reliable choice on the crowded 2.4 GHz band.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                SectionLabel("Transmit power")
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    FilterChip(selected = txPower == 0, onClick = { txPower = 0 }, label = { Text("Maximum") })
+                    HotspotConfig.TX_POWERS.forEach { p ->
+                        FilterChip(selected = txPower == p, onClick = { txPower = p }, label = { Text("$p dBm") })
+                    }
+                }
+                Text(
+                    "Lower power: shorter range (devices further away drop off), less interference with neighbours, a little " +
+                        "less battery. It is a limit for the whole Wi-Fi radio - the phone's own Wi-Fi connection too - while " +
+                        "the hotspot runs, and never goes above the legal maximum.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
             Gated(caps.maxClients, phoneReason(rootHas = true)) {
                 SectionLabel("Max devices: $maxClients")
                 Slider(
@@ -185,8 +220,29 @@ fun HotspotTab(padding: PaddingValues) {
 
             Gated(caps.radioDetails) {
                 SectionLabel("Advanced")
-                Text("Access point MAC (BSSID): $bssid", fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyMedium)
-                OutlinedButton(onClick = { bssid = Mac.randomLocal() }) { Text("New random BSSID") }
+                Text("Access point MAC address (BSSID)", style = MaterialTheme.typography.bodyLarge)
+                RadioRow(
+                    "Random",
+                    "A made-up address SegAP keeps, so the phone's real one isn't broadcast.",
+                    macMode == MacMode.RANDOM,
+                ) { macMode = MacMode.RANDOM }
+                if (macMode == MacMode.RANDOM) {
+                    Text(bssid, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(start = 48.dp))
+                    OutlinedButton(onClick = { bssid = Mac.randomLocal() }, modifier = Modifier.padding(start = 48.dp)) {
+                        Text("New random address")
+                    }
+                }
+                RadioRow(
+                    "Hardware",
+                    "The phone's own factory Wi-Fi address (read from the phone when the hotspot starts).",
+                    macMode == MacMode.HARDWARE,
+                ) { macMode = MacMode.HARDWARE }
+                Text(
+                    "Devices remember a network by name, so they rejoin after a change; fixed IPs and blocks are per device " +
+                        "and not affected.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 Text("Radio interface", style = MaterialTheme.typography.bodyLarge)
                 RadioRow("swlan0 (recommended)", "Works alongside the phone's own Wi-Fi connection.", iface == "swlan0") { iface = "swlan0" }
                 RadioRow("wlan0", "Only with the phone's Wi-Fi turned off.", iface == "wlan0") { iface = "wlan0"; wifiMode = WifiMode.OFF }

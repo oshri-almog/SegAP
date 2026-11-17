@@ -10,6 +10,8 @@
  *          ERR <mac> <reason>
  *        (tx = phone -> device, i.e. the device's download; rx = device -> phone, its upload)
  *        mhwl -x <iface> <mac>                 hex dump of the raw record (layout debugging)
+ *        mhwl -g <iface> <iovar>               integer firmware variable, e.g. qtxpower (quarter dBm), chanspec
+ *        mhwl -s <iface> <iovar> <value>       set it (the engine's transmit power limit uses qtxpower)
  */
 #include <errno.h>
 #include <net/if.h>
@@ -23,6 +25,7 @@
 #include <linux/sockios.h>
 
 #define WLC_GET_VAR 262
+#define WLC_SET_VAR 263
 #define BUF_LEN 1536
 
 /* Layout the bcmdhd ioctl entry copies from user space: wl_ioctl_t followed by a 4-byte "driver"
@@ -93,7 +96,46 @@ static int avg_rssi(const uint8_t *p) {
     return n ? sum / n : 0;
 }
 
+/* Integer firmware variable ("iovar"), as `wl <name>` / `wl <name> <value>` would read or set it. */
+static int iovar_int(int fd, const char *ifname, const char *name, int set, int32_t *val) {
+    static uint8_t buf[BUF_LEN];
+    size_t n = strlen(name) + 1;
+    if (n + 4 > BUF_LEN) return -1;
+    memset(buf, 0, BUF_LEN);
+    memcpy(buf, name, n);
+    if (set) memcpy(buf + n, val, 4);
+
+    struct wl_ioctl_req ioc;
+    memset(&ioc, 0, sizeof(ioc));
+    ioc.cmd = set ? WLC_SET_VAR : WLC_GET_VAR;
+    ioc.buf = buf;
+    ioc.len = set ? (uint32_t)(n + 4) : BUF_LEN;
+    ioc.set = (uint8_t)set;
+
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
+    ifr.ifr_data = (char *)&ioc;
+    if (ioctl(fd, SIOCDEVPRIVATE, &ifr) != 0) return -1;
+    if (!set) memcpy(val, buf, 4);
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    /* mhwl -g <iface> <iovar>          prints the integer value (e.g. qtxpower, chanspec)
+     * mhwl -s <iface> <iovar> <value>  sets it */
+    if (argc >= 4 && (strcmp(argv[1], "-g") == 0 || strcmp(argv[1], "-s") == 0)) {
+        int set = argv[1][1] == 's';
+        if (set && argc < 5) { fprintf(stderr, "usage: mhwl -s <iface> <iovar> <value>\n"); return 2; }
+        int fd = socket(AF_INET, SOCK_DGRAM, 0);
+        if (fd < 0) { perror("socket"); return 1; }
+        int32_t v = set ? (int32_t)strtol(argv[4], NULL, 0) : 0;
+        int r = iovar_int(fd, argv[2], argv[3], set, &v);
+        close(fd);
+        if (r != 0) { printf("ERR %s ioctl-%d\n", argv[3], errno); return 1; }
+        if (!set) printf("%s %d 0x%x\n", argv[3], v, (unsigned)v);
+        return 0;
+    }
     int hex = 0, a = 1;
     if (argc > 1 && strcmp(argv[1], "-x") == 0) { hex = 1; a = 2; }
     if (argc - a < 2) {

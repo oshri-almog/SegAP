@@ -3,6 +3,7 @@ package com.oshri.multihotspot.data
 import com.oshri.multihotspot.model.Group
 import com.oshri.multihotspot.model.HotspotConfig
 import com.oshri.multihotspot.model.HotspotProfile
+import com.oshri.multihotspot.model.MacMode
 import com.oshri.multihotspot.model.StaticLease
 import com.oshri.multihotspot.model.WifiMode
 import org.json.JSONArray
@@ -63,6 +64,7 @@ class ConfigStore(private val file: File) {
             put("blockedMacs", JSONArray(c.blockedMacs))
             put("band5", c.band5)
             put("channel5", c.channel5)
+            put("txPower", c.txPower); put("bandwidth40", c.bandwidth40); put("macMode", c.macMode.name)
             put("profiles", JSONArray().apply {
                 c.profiles.forEach { pr ->
                     put(JSONObject().apply {
@@ -70,11 +72,14 @@ class ConfigStore(private val file: File) {
                         put("hidden", pr.hidden); put("maxClients", pr.maxClients); put("bssid", pr.bssid)
                         put("iface", pr.iface); put("wifiMode", pr.wifiMode.name); put("strictIsolation", pr.strictIsolation)
                         put("band5", pr.band5); put("channel5", pr.channel5)
+                        put("txPower", pr.txPower); put("bandwidth40", pr.bandwidth40); put("macMode", pr.macMode.name)
                     })
                 }
             })
             put("activeProfile", c.activeProfile)
         }
+
+        private fun macMode(s: String) = runCatching { MacMode.valueOf(s) }.getOrDefault(MacMode.RANDOM)
 
         fun fromJson(o: JSONObject): HotspotConfig {
             val def = HotspotConfig.default()
@@ -113,6 +118,8 @@ class ConfigStore(private val file: File) {
                         wifiMode = runCatching { WifiMode.valueOf(p.optString("wifiMode", "KEEP")) }.getOrDefault(WifiMode.KEEP),
                         strictIsolation = p.optBoolean("strictIsolation", true),
                         band5 = p.optBoolean("band5", false), channel5 = p.optInt("channel5", 0),
+                        txPower = p.optInt("txPower", 0), bandwidth40 = p.optBoolean("bandwidth40", false),
+                        macMode = macMode(p.optString("macMode")),
                     )
                 }
             } ?: emptyList()
@@ -131,6 +138,9 @@ class ConfigStore(private val file: File) {
                 blockedMacs = blocked,
                 band5 = o.optBoolean("band5", false),
                 channel5 = o.optInt("channel5", 0),
+                txPower = o.optInt("txPower", 0),
+                bandwidth40 = o.optBoolean("bandwidth40", false),
+                macMode = macMode(o.optString("macMode")),
                 profiles = profiles,
                 activeProfile = o.optString("activeProfile", ""),
             )

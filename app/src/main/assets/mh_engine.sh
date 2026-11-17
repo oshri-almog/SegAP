@@ -15,7 +15,8 @@
 #   mh_engine.sh ts-down <group> | ts-logout <group>
 #
 # <cfgdir> must contain:
-#   engine.conf  KEY=VALUE lines: IFACE, MAC, WIFI_MODE (keep|off), UPSTREAM (auto|<iface>), DEFAULT_GROUP, WL_HELPER
+#   engine.conf  KEY=VALUE lines: IFACE, MAC (address or "hw" = the phone's factory MAC), WIFI_MODE (keep|off),
+#                UPSTREAM (auto|<iface>), DEFAULT_GROUP, WL_HELPER, TXPOWER (dBm limit, 0/absent = none)
 #   hostapd.conf complete hostapd config (wpa_psk_file must point to $HD/psk.txt)
 #   psk.txt      hostapd wpa_psk_file, one "keyid=<group> 00:00:00:00:00:00 <passphrase>" per group
 #   groups.conf  ID GW PREFIX NETCIDR NETMASK INTERNET(0|1) ISOLATE(0|1) DHCP_START DHCP_END LEASE DNS(csv) TAILSCALE(0|1) REACH(csv ids|-)
@@ -953,6 +954,7 @@ watchdog() {
       # Clean up once (firewall, DHCP, routes, Wi-Fi-off) and leave the radio to whoever has it now.
       net_teardown soft
       restore_wifi
+      reset_txpower
       echo failed > $ST/state
       echo "$w_reason" > $ST/reason
       ts_down_all
@@ -975,6 +977,7 @@ watchdog() {
       while read -r w_m w_g w_s; do [ -n "$w_m" ] && src_rule "$w_m" "$w_g"; done < $ST/connected
     fi
     pin_leases
+    keep_txpower "$IF"
   done
 }
 
@@ -1051,6 +1054,10 @@ start() {
   setsid sh $ST/mh_engine.sh daemon </dev/null >/dev/null 2>&1 &
 
   ip link set $IF down
+  if [ "$MAC" = hw ]; then
+    MAC=$(hw_mac)
+    if [ -n "$MAC" ]; then log "using the phone's own (hardware) MAC"; else log "hardware MAC unknown - keeping the interface's address"; fi
+  fi
   [ -n "$MAC" ] && ip link set $IF address $MAC
   rm -f $CTRL_DIR/$IF
   setsid $HOSTAPD $HD/hostapd.conf </dev/null >/dev/null 2>&1 &
@@ -1110,14 +1117,64 @@ start() {
     exit 1
   fi
 
+  # Last: the driver resets the power limit while the access point finishes coming up.
+  set_txpower $IF
   echo running > $ST/state
   log "running"
   echo "OK"
 }
 
+# The phone's factory Wi-Fi MAC (Samsung keeps it in the EFS partition), lower case; empty if unknown.
+hw_mac() {
+  for hm_f in /mnt/vendor/efs/wifi/.mac.info /efs/wifi/.mac.info; do
+    hm_m=$(tr -d ' \r\n' < $hm_f 2>/dev/null | tr 'A-F' 'a-f')
+    echo "$hm_m" | grep -qE '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' && { echo "$hm_m"; return 0; }
+  done
+  return 1
+}
+
+# Transmit power limit (TXPOWER dBm, via the firmware's "qtxpower" in quarter dBm). It is a limit, never above
+# the regulatory maximum, and applies to the whole radio (the phone's own Wi-Fi too) - so it's undone on stop.
+set_txpower() {
+  tp_w=$(cfg WL_HELPER); tp_p=$(cfg TXPOWER)
+  [ -n "$tp_w" ] && [ -x "$tp_w" ] || { [ -n "$tp_p" ] && log "transmit power: no radio helper on this phone"; return 0; }
+  if [ -n "$tp_p" ] && [ "$tp_p" != 0 ]; then
+    if "$tp_w" -s $1 qtxpower $((tp_p * 4)) >/dev/null 2>&1; then
+      echo "$tp_w $1" > $ST/txpower_set; log "transmit power limited to ${tp_p} dBm"
+    else
+      log "transmit power: the driver refused the limit"
+    fi
+  else
+    reset_txpower
+  fi
+}
+
+# The driver may drop the limit (radio reset, channel change): put it back.
+keep_txpower() {
+  [ -f $ST/txpower_set ] || return 0
+  kt_p=$(cfg TXPOWER); read -r kt_w kt_if < $ST/txpower_set
+  kt_v=$("$kt_w" -g $1 qtxpower 2>/dev/null | awk '{print $2}')
+  [ -n "$kt_v" ] && [ -n "$kt_p" ] || return 0
+  if [ $(( kt_v & 0x7fffffff )) != $(( kt_p * 4 )) ] && "$kt_w" -s $1 qtxpower $(( kt_p * 4 )) >/dev/null 2>&1; then
+    log "transmit power limit (${kt_p} dBm) re-applied"
+  fi
+}
+
+# Back to no limit (127 = maximum) if SegAP set one.
+reset_txpower() {
+  [ -f $ST/txpower_set ] || return 0
+  read -r rt_w rt_if < $ST/txpower_set
+  for rt_i in $rt_if wlan0; do
+    [ -d /sys/class/net/$rt_i ] && [ -x "$rt_w" ] && "$rt_w" -s $rt_i qtxpower 127 >/dev/null 2>&1 && { log "transmit power limit removed"; break; }
+  done
+  rm -f $ST/txpower_set
+}
+
 # stop [keepwifi]
 stop() {
   reset_stale >/dev/null
+  # First, while the interface is still up (the driver refuses it once it's down). A restart sets it again.
+  reset_txpower
   kill_engine_procs
   net_teardown
   [ "$1" = keepwifi ] || restore_wifi
@@ -1169,6 +1226,13 @@ status() {
   # Radio stats (RSSI, byte counters, link rates) from the driver via the native helper, if present.
   s_wl=${1:-$(cfg WL_HELPER)}   # the app passes the current path (it moves when the app is updated)
   : > $s_st
+  # Channel width actually in use (chanspec bandwidth bits) and the transmit power limit (quarter dBm, 127 = none).
+  if [ "$s_state" = running ] && [ -n "$s_wl" ] && [ -x "$s_wl" ]; then
+    s_cs=$("$s_wl" -g "$(cfg IFACE)" chanspec 2>/dev/null | awk '{print $2}')
+    case "$(( ${s_cs:-0} & 0x3800 ))" in 4096) echo "CHANBW=20" ;; 6144) echo "CHANBW=40" ;; 8192) echo "CHANBW=80" ;; esac
+    s_tp=$("$s_wl" -g "$(cfg IFACE)" qtxpower 2>/dev/null | awk '{print $2}')
+    [ -n "$s_tp" ] && echo "TXPWR=$(( (s_tp & 0x7fffffff) >= 127 ? 0 : (s_tp & 0x7fffffff) / 4 ))"
+  fi
   if [ -n "$s_wl" ] && [ -x "$s_wl" ] && [ -s $ST/connected ]; then
     "$s_wl" "$(cfg IFACE)" $(awk '{print $1}' $ST/connected) > $s_st 2>/dev/null
   fi

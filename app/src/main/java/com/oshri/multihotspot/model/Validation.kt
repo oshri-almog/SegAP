@@ -86,6 +86,7 @@ object Validation {
         ssid(c.ssid)?.let { errors += it }
         if (c.channel !in HotspotConfig.CHANNELS_24GHZ) errors += "Channel must be 1-13"
         if (c.channel5 != 0 && c.channel5 !in HotspotConfig.CHANNELS_5GHZ) errors += "5 GHz channel ${c.channel5} isn't supported"
+        if (c.txPower != 0 && c.txPower !in HotspotConfig.TX_POWERS) errors += "Transmit power ${c.txPower} dBm isn't one of the choices"
         if (c.maxClients !in 1..MAX_CLIENTS) errors += "Max devices must be 1-$MAX_CLIENTS"
         if (Mac.normalize(c.bssid) == null) errors += "Invalid BSSID"
         if (c.iface !in listOf("swlan0", "wlan0")) errors += "Unknown radio interface ${c.iface}"

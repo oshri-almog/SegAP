@@ -29,7 +29,13 @@ Without root, SegAP can still run the phone's own hotspot with one network throu
   - **its own exit node** — e.g. Home's internet leaves through a server at home while Guest uses the phone's
     connection, each network with a different exit node;
   - **shared with your tailnet** as a subnet route, so tailnet devices reach the network's devices.
-- **Exact channel selection** (2.4 GHz, 1–13), hidden SSID, max clients, fixed BSSID.
+- **Exact channel selection** (2.4 GHz, 1–13), hidden SSID, max clients.
+- **Radio options** (root engine, saved per profile):
+  - **channel width** 20 or 40 MHz — 40 MHz only where no neighbouring network overlaps (802.11n coexistence
+    rules), otherwise 20 MHz; the Status tab shows the width actually in use;
+  - **transmit power** limit (maximum, 17, 14, 11, 8 or 5 dBm) through the Broadcom driver — a limit for the whole
+    Wi-Fi radio while the hotspot runs, never above the legal maximum, removed when it stops;
+  - **access point MAC**: a random address SegAP keeps (or a new one), or the phone's own hardware MAC.
 - **Fixed IPs** per device, **block** devices.
 - **QR code** per network — scan to join with that network's password.
 - **Connected devices**: signal strength in dBm with animated bars, live download/upload rate,

@@ -218,15 +218,22 @@ fun radioLine(config: HotspotConfig, status: EngineStatus, backend: BackendKind?
             if (f < 3000) "2.4 GHz channel ${(f - 2407) / 5} ($f MHz)" else "5 GHz channel ${(f - 5000) / 5} ($f MHz)"
         backend == BackendKind.SHIZUKU && config.band5 ->
             if (config.channel5 == 0) "5 GHz, channel chosen by the phone" else "5 GHz channel ${config.channel5}"
-        else -> "2.4 GHz channel ${config.channel} (${channelFrequency(config.channel)} MHz)"
+        else -> "2.4 GHz channel ${config.channel} (${channelFrequency(config.channel)} MHz)" +
+            // While running, the root engine reports the width and power limit actually in effect.
+            (if (status.state == EngineState.RUNNING && status.bandwidthMhz > 0) " · ${status.bandwidthMhz} MHz" else "") +
+            (if (status.state == EngineState.RUNNING && (status.txPowerDbm ?: 0) > 0) " · max ${status.txPowerDbm} dBm" else "")
     }
 }
 
 /** 5 GHz was chosen but the phone's hotspot runs on 2.4 GHz: the phone decides when it can't (its own Wi-Fi, country). */
-fun bandNote(config: HotspotConfig, status: EngineStatus, backend: BackendKind?): String? =
-    if (backend == BackendKind.SHIZUKU && status.state == EngineState.RUNNING && config.band5 && status.frequencyMhz in 1..2999)
+fun bandNote(config: HotspotConfig, status: EngineStatus, backend: BackendKind?): String? = when {
+    status.state != EngineState.RUNNING -> null
+    backend == BackendKind.SHIZUKU && config.band5 && status.frequencyMhz in 1..2999 ->
         "5 GHz isn't possible right now, so the phone uses 2.4 GHz. This usually happens while the phone itself is on Wi-Fi."
-    else null
+    backend == BackendKind.ROOT && config.bandwidth40 && status.bandwidthMhz == 20 ->
+        "40 MHz isn't possible here: a neighbouring network overlaps the wider channel, so Wi-Fi's rules keep it at 20 MHz."
+    else -> null
+}
 
 /** Snackbar text after a settings change: while the hotspot runs, changes wait for Apply. */
 fun savedMessage(what: String, state: EngineState): String =

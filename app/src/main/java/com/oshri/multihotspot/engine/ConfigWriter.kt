@@ -1,6 +1,7 @@
 package com.oshri.multihotspot.engine
 
 import com.oshri.multihotspot.model.HotspotConfig
+import com.oshri.multihotspot.model.MacMode
 import com.oshri.multihotspot.model.Mac
 import com.oshri.multihotspot.model.WifiMode
 import java.io.File
@@ -13,11 +14,12 @@ object ConfigWriter {
 
     fun engineConf(c: HotspotConfig, wlHelper: String = ""): String = buildString {
         appendLine("IFACE=${c.iface}")
-        appendLine("MAC=${Mac.normalize(c.bssid) ?: ""}")
+        appendLine("MAC=${if (c.macMode == MacMode.HARDWARE) "hw" else Mac.normalize(c.bssid) ?: ""}")
         appendLine("WIFI_MODE=${if (c.wifiMode == WifiMode.OFF) "off" else "keep"}")
         appendLine("UPSTREAM=auto")
         appendLine("DEFAULT_GROUP=${defaultGroupId(c)}")
         if (wlHelper.isNotBlank()) appendLine("WL_HELPER=$wlHelper")
+        if (c.txPower != 0) appendLine("TXPOWER=${c.txPower}")
     }
 
     /** Devices without a keyid (should not happen with wpa_psk_file) go to the most restricted group. */
@@ -32,6 +34,9 @@ object ConfigWriter {
         appendLine("hw_mode=g")
         appendLine("channel=${c.channel}")
         appendLine("ieee80211n=1")
+        // 40 MHz: the second 20 MHz channel above (1-7) or below (8-13). hostapd only uses it when no neighbouring
+        // network overlaps (802.11n 20/40 coexistence); otherwise it stays at 20 MHz.
+        if (c.bandwidth40) appendLine("ht_capab=[${if (c.channel <= 7) "HT40+" else "HT40-"}][SHORT-GI-20][SHORT-GI-40]")
         appendLine("wmm_enabled=1")
         // Sleeping clients wake for buffered traffic every DTIM beacon: 1 = every 100 ms (driver default 2 = 200 ms).
         appendLine("beacon_int=100")
