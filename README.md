@@ -84,6 +84,20 @@ blurred, and the QR code is replaced by a sample.
 </tr>
 </table>
 
+### Home-screen widget
+
+The hotspot at a glance without opening the app: on/off, Wi-Fi name, channel and internet source, the profile in
+use, and the connected devices with their IP and network. **Turn on / Turn off** starts or stops the hotspot right
+from the home screen, the profile button opens a list to switch profile (the hotspot restarts with it), and tapping
+the widget opens the app. Add it from the Hotspot tab (*Add to home screen*) or the launcher's widget list.
+
+<table>
+<tr>
+<td align="center" valign="top" width="57%"><img src="docs/screenshots/widget.png" width="400" alt="SegAP home-screen widget: hotspot on, channel 12, two connected devices with IPs"><br><sub>The widget: state, channel, internet source, profile, connected devices</sub></td>
+<td align="center" valign="top" width="43%"><img src="docs/screenshots/widget-profiles.png" width="260" alt="Profile list opened from the widget"><br><sub>Tap the profile to switch</sub></td>
+</tr>
+</table>
+
 ## Why one SSID with several passwords (and not several SSIDs)?
 
 The goal was several SSIDs with separate LANs. Testing on the S10 showed what its Broadcom BCM4375 /
