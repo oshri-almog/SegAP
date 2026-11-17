@@ -48,7 +48,7 @@ Without root, SegAP can still run the phone's own hotspot with one network throu
 - **Hotspot profiles** (Hotspot tab): saved sets of hotspot settings — Wi-Fi name, hidden, channel, max devices,
   radio settings — e.g. "Home" and "Travel"; tap one to use it (the hotspot restarts with it). The networks and
   their passwords are shared by all profiles.
-- **Home-screen widget**: hotspot on/off button, Wi-Fi name, channel and internet source, and the connected
+- **Home-screen widget**: hotspot on/off button, profile picker, Wi-Fi name, channel and internet source, and the connected
   devices with their IPs and networks (Hotspot tab → *Add to home screen*, or from the launcher's widget list).
 - Foreground notification with device count; status is polled from the engine.
 - **Two engines**: root (everything above) or, without root, [Shizuku](#without-root-the-shizuku-engine)

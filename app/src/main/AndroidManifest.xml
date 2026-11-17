@@ -39,6 +39,15 @@
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
 
+        <!-- The widget's profile list (a pop-up over the home screen). -->
+        <activity
+            android:name=".widget.ProfilePickerActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:launchMode="singleInstance"
+            android:taskAffinity=""
+            android:theme="@style/Theme.MultiHotspot.Picker" />
+
         <!-- Home-screen widget: hotspot on/off, channel, connected devices. -->
         <receiver
             android:name=".widget.HotspotWidget"

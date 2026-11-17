@@ -95,20 +95,20 @@ class HotspotWidget : AppWidgetProvider() {
                 add(c.ssid)
                 if (running) add(shortRadio(c, s, backend))
                 if (running) add(if (s.upstream.isBlank()) "no internet source" else "via ${s.upstream}")
-                if (!running && profile != null && c.profiles.size > 1) add("profile $profile")
             }.joinToString(" · ")
             val clients = s.clients.map { cl ->
                 val idx = c.groups.indexOfFirst { it.id == cl.groupId }
                 Row(cl.hostname ?: "Unknown device", cl.ip ?: "…", c.group(cl.groupId)?.name ?: cl.groupId, groupColor(idx).toArgb())
             }
             val message = error?.lineSequence()?.filter { it.isNotBlank() }?.take(2)?.joinToString(" ")
-            val key = listOf(title, info, message, running, clients).toString()
+            val key = listOf(title, info, message, running, clients, profile).toString()
             if (!force && key == lastShown) return
             lastShown = key
 
             val views = RemoteViews(context.packageName, R.layout.widget_hotspot)
             views.setTextViewText(R.id.widget_title, title)
             views.setTextViewText(R.id.widget_info, info)
+            views.setTextViewText(R.id.widget_profile, "${profile ?: "Profile"}  ▾")
             views.setInt(R.id.widget_icon, "setImageAlpha", if (running) 255 else 120)
             views.setTextViewText(R.id.widget_toggle, if (busy != null) "…" else if (running) "Turn off" else "Turn on")
             views.setInt(R.id.widget_toggle, "setBackgroundResource",
@@ -130,6 +130,10 @@ class HotspotWidget : AppWidgetProvider() {
 
             views.setOnClickPendingIntent(R.id.widget_root, PendingIntent.getActivity(
                 context, 0, Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            ))
+            views.setOnClickPendingIntent(R.id.widget_profile, PendingIntent.getActivity(
+                context, 1, Intent(context, ProfilePickerActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
             ))
             views.setOnClickPendingIntent(R.id.widget_refresh, PendingIntent.getBroadcast(

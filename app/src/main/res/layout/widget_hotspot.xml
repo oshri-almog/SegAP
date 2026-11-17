@@ -72,6 +72,22 @@
             android:textStyle="bold" />
     </LinearLayout>
 
+    <!-- Active profile; tap for the list (a pop-up: widgets can't show a drop-down). -->
+    <TextView
+        android:id="@+id/widget_profile"
+        android:layout_width="wrap_content"
+        android:layout_height="30dp"
+        android:layout_marginTop="8dp"
+        android:background="@drawable/widget_chip_bg"
+        android:ellipsize="end"
+        android:gravity="center_vertical"
+        android:maxLines="1"
+        android:maxWidth="240dp"
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
+        android:textColor="#FFFFFFFF"
+        android:textSize="13sp" />
+
     <TextView
         android:id="@+id/widget_message"
         android:layout_width="match_parent"
