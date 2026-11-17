@@ -22,12 +22,20 @@ import com.oshri.multihotspot.model.HotspotConfig
 import com.oshri.multihotspot.model.ShizukuConfigPrint
 import com.oshri.multihotspot.model.TailscaleInstance
 import com.oshri.multihotspot.model.Validation
+import com.oshri.multihotspot.model.active
+import com.oshri.multihotspot.model.asProfile
+import com.oshri.multihotspot.model.nextProfileId
 import com.oshri.multihotspot.model.normalized
+import com.oshri.multihotspot.model.shizukuNetwork
 import com.oshri.multihotspot.model.shizukuView
+import com.oshri.multihotspot.model.syncedProfiles
+import com.oshri.multihotspot.model.withSettingsOf
 import com.oshri.multihotspot.service.HotspotService
+import com.oshri.multihotspot.widget.HotspotWidget
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -37,6 +45,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import rikka.shizuku.Shizuku
 import java.io.File
 
@@ -118,17 +127,75 @@ object HotspotController {
         engine = Engine(appContext)
         rootBackend = RootBackend(engine)
         shizukuBackend = ShizukuBackend(appContext)
-        _config.value = store.load()
+        // Configs from before profiles get a "Default" profile holding their settings.
+        _config.value = store.load().syncedProfiles()
         _engineMode.value = prefs.engineMode
         _owner.value = prefs.owner
         // Shizuku hands over its binder asynchronously (and again after it restarts).
         Shizuku.addBinderReceivedListenerSticky { _shizuku.value = ShizukuSupport.state(appContext); appScope.launch { refresh() } }
         Shizuku.addBinderDeadListener { _shizuku.value = ShizukuSupport.state(appContext) }
+        HotspotWidget.observe(appContext, appScope)
     }
 
+    /** Saves [newConfig]; the active profile always takes the hotspot settings saved with it. */
     fun updateConfig(newConfig: HotspotConfig) {
-        _config.value = newConfig
-        store.save(newConfig)
+        val c = newConfig.syncedProfiles()
+        _config.value = c
+        store.save(c)
+    }
+
+    private fun applyIfRunning() {
+        if (_status.value.state == EngineState.RUNNING) startAsync()
+    }
+
+    /**
+     * Switches a network on or off; while the hotspot runs it applies at once (the hotspot restarts, so devices
+     * reconnect). Returns why it can't, or null.
+     */
+    fun setNetworkEnabled(groupId: String, on: Boolean): String? {
+        val c = _config.value
+        val g = c.group(groupId) ?: return "That network no longer exists"
+        if (g.enabled == on) return null
+        if (_busy.value != null) return "Wait until the hotspot has finished ${_busy.value?.trimEnd('.')?.lowercase()}"
+        if (!on && c.groups.count { it.enabled } == 1) return "At least one network has to stay on"
+        updateConfig(c.copy(groups = c.groups.map { if (it.id == groupId) it.copy(enabled = on) else it }))
+        applyIfRunning()
+        return null
+    }
+
+    /** Makes profile [id]'s hotspot settings the ones in use; while the hotspot runs it restarts with them. */
+    fun selectProfile(id: String): String? {
+        val c = _config.value
+        val p = c.profiles.firstOrNull { it.id == id } ?: return "That profile no longer exists"
+        if (c.activeProfile == id) return null
+        if (_busy.value != null) return "Wait until the hotspot has finished ${_busy.value?.trimEnd('.')?.lowercase()}"
+        updateConfig(c.syncedProfiles().withSettingsOf(p))
+        applyIfRunning()
+        return null
+    }
+
+    /** A new profile with the current settings (it becomes the active one: nothing changes until it's edited). */
+    fun addProfile(name: String): String? {
+        val c = _config.value.syncedProfiles()
+        Validation.profileName(name, c.profiles.map { it.name })?.let { return it }
+        val p = c.asProfile(c.nextProfileId(), name.trim())
+        updateConfig(c.copy(profiles = c.profiles + p, activeProfile = p.id))
+        return null
+    }
+
+    fun renameProfile(id: String, name: String): String? {
+        val c = _config.value
+        Validation.profileName(name, c.profiles.filter { it.id != id }.map { it.name })?.let { return it }
+        updateConfig(c.copy(profiles = c.profiles.map { if (it.id == id) it.copy(name = name.trim()) else it }))
+        return null
+    }
+
+    /** Deletes a profile other than the one in use. */
+    fun deleteProfile(id: String): String? {
+        val c = _config.value
+        if (c.activeProfile == id) return "Switch to another profile before deleting this one"
+        updateConfig(c.copy(profiles = c.profiles.filter { it.id != id }))
+        return null
     }
 
     fun clearError() { _error.value = null }
@@ -164,6 +231,19 @@ object HotspotController {
     }
 
     fun openShizuku(): Boolean = ShizukuSupport.launch(appContext)
+
+    /**
+     * Started from outside the app (the widget), the process may be new: Shizuku hands over its binder a moment
+     * after start. Waits briefly for it when Shizuku may be the engine.
+     */
+    suspend fun awaitEngine(timeoutMs: Long = 4_000) {
+        if (_engineMode.value != EngineMode.SHIZUKU && rootOk()) return
+        if (!ShizukuSupport.installed(appContext)) return
+        withTimeoutOrNull(timeoutMs) {
+            while (ShizukuSupport.state(appContext) == ShizukuSupport.State.NOT_RUNNING) delay(100)
+        }
+        _shizuku.value = ShizukuSupport.state(appContext)
+    }
 
     /** The app came to the foreground: root may have been granted or Shizuku started meanwhile. */
     suspend fun onVisible() {
@@ -221,7 +301,7 @@ object HotspotController {
 
     /** What has to be fixed before starting with [kind]. Shizuku runs the first network only: the rest needn't be valid. */
     fun problems(c: HotspotConfig, kind: BackendKind?): List<String> =
-        if (kind == BackendKind.SHIZUKU) Validation.shizukuConfig(c) else Validation.config(c)
+        Validation.forStart(c, shizuku = kind == BackendKind.SHIZUKU)
 
     /** Whether the running hotspot uses older settings than the saved ones (only what its engine uses counts). */
     fun needsApply(applied: HotspotConfig?, config: HotspotConfig, status: EngineStatus, kind: BackendKind?): Boolean =
@@ -245,7 +325,7 @@ object HotspotController {
     }
 
     private suspend fun refreshShizuku() {
-        val raw = shizukuBackend.status(_config.value.groups.first().id)
+        val raw = shizukuBackend.status(_config.value.shizukuNetwork()?.id ?: "g1")
         if (raw.state == EngineState.UNKNOWN && _owner.value == BackendKind.SHIZUKU) {
             // The hotspot may well still be on: say so instead of "off".
             _status.value = raw.copy(reason = "SegAP can't reach Shizuku. If the hotspot is still on, start Shizuku again, " +
@@ -344,7 +424,8 @@ object HotspotController {
         ensureService()
         attemptedStore.save(c)
         setOwner(kind)
-        val r = backendFor(kind).start(c)
+        // The engines only see the networks that are switched on.
+        val r = backendFor(kind).start(c.active())
         if (!r.ok) {
             _error.value = "Hotspot failed to start:\n${r.message}"
             refresh()
@@ -427,7 +508,7 @@ object HotspotController {
 
     /** Stops the group's instance unless the running hotspot uses it (it keeps its login). */
     fun tailscaleReleaseAsync(groupId: String) {
-        val inUse = _status.value.state == EngineState.RUNNING && _applied.value?.group(groupId)?.hasTailscaleInstance == true
+        val inUse = _status.value.state == EngineState.RUNNING && _applied.value?.active()?.group(groupId)?.hasTailscaleInstance == true
         if (!inUse && _root.value == true) appScope.launch { engine.tailscaleDown(groupId) }
     }
 

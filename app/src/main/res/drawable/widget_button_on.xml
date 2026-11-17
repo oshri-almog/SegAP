@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Widget on/off button while the hotspot is off (tap to turn it on). -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <solid android:color="#FF3D6FD8" />
+    <corners android:radius="16dp" />
+</shape>

@@ -134,14 +134,14 @@ class ShizukuEngineTest {
         // The second network clashes with the first: root can't start, Shizuku (first network only) can.
         val clash = config.copy(groups = listOf(config.groups[0], group("g2", "192.168.10.2")))
         assertTrue(Validation.config(clash).isNotEmpty())
-        assertTrue(Validation.shizukuConfig(clash).isEmpty())
+        assertTrue(Validation.forStart(clash, shizuku = true).isEmpty())
         // Access to the other networks doesn't apply either (it isn't "a network that no longer exists").
         val reach = config.copy(groups = listOf(config.groups[0].copy(canReach = listOf("g2")), config.groups[1]))
         assertTrue(Validation.config(reach).isEmpty())
-        assertTrue(Validation.shizukuConfig(reach).isEmpty())
+        assertTrue(Validation.forStart(reach, shizuku = true).isEmpty())
         // ...but the first network's password still has to be valid.
         val badPw = config.copy(groups = listOf(config.groups[0].copy(password = "short")))
-        assertTrue(Validation.shizukuConfig(badPw).isNotEmpty())
+        assertTrue(Validation.forStart(badPw, shizuku = true).isNotEmpty())
         assertTrue(Validation.config(config.copy(channel5 = 52)).any { "5 GHz" in it })
     }
 

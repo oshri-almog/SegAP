@@ -37,6 +37,13 @@ Without root, SegAP can still run the phone's own hotspot with one network throu
 - Internet from the phone's **Wi-Fi (repeater mode) or mobile data**.
 - Full-screen app with five tabs: **Status** (hotspot and devices), **Hotspot** settings, **Networks**,
   **Fixed IPs** & blocked devices, **Logs**.
+- **Switch networks on and off** (Networks tab): a switched-off network's password stops working and nothing of
+  it is set up (its Tailscale device stops too, keeping its login). While the hotspot runs it applies at once.
+- **Hotspot profiles** (Hotspot tab): saved sets of hotspot settings — Wi-Fi name, hidden, channel, max devices,
+  radio settings — e.g. "Home" and "Travel"; tap one to use it (the hotspot restarts with it). The networks and
+  their passwords are shared by all profiles.
+- **Home-screen widget**: hotspot on/off button, Wi-Fi name, channel and internet source, and the connected
+  devices with their IPs and networks (Hotspot tab → *Add to home screen*, or from the launcher's widget list).
 - Foreground notification with device count; status is polled from the engine.
 - **Two engines**: root (everything above) or, without root, [Shizuku](#without-root-the-shizuku-engine)
   (the phone's own hotspot, one network; root-only settings are greyed out).
@@ -253,7 +260,11 @@ edit `$ndk` if yours is elsewhere). On Linux/macOS:
 ## Usage tips
 
 - Changes apply when you tap **Apply changes** (on any tab while the hotspot runs; the hotspot restarts and
-  devices reconnect by themselves).
+  devices reconnect by themselves). Switching a network on/off or choosing another profile applies at once.
+- With the Shizuku engine, the phone's hotspot uses the first network that is switched on: switch networks on/off
+  to choose which password it uses.
+- The root engine can't start while **USB tethering** (or another tethering that runs Android's DHCP server) is
+  on: the DHCP port is taken ("DHCP server failed to start").
 - Phones use a **different random MAC per Wi-Fi name (SSID)**: after changing the Wi-Fi name in the Hotspot tab,
   re-create fixed IPs / blocks. Renaming a network (Home, Guest, …) only changes its label in the app
   (and the name of its Tailscale device, if it has one).

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Home-screen widget background: dark, slightly translucent, rounded like Android 12+ widgets. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <solid android:color="#E61B1C22" />
+    <corners android:radius="20dp" />
+</shape>

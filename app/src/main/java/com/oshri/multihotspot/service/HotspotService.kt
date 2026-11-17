@@ -67,8 +67,31 @@ class HotspotService : Service() {
             }
             return START_NOT_STICKY
         }
+        if (intent?.action == ACTION_TOGGLE) {
+            scope.launch { toggle() }
+            return START_NOT_STICKY
+        }
         if (poller?.isActive != true) poller = scope.launch { pollLoop() }
         return START_STICKY
+    }
+
+    /** The widget's on/off button: stop the hotspot if it runs, else start it. */
+    private suspend fun toggle() {
+        if (HotspotController.busy.value != null) return // already starting or stopping; the widget shows it
+        HotspotController.refresh()
+        if (HotspotController.status.value.state == EngineState.RUNNING) {
+            HotspotController.stop()
+        } else {
+            // Started from the home screen, the app may not have Shizuku's binder yet.
+            HotspotController.awaitEngine()
+            HotspotController.start()
+        }
+        // Running (or unreachable): keep watching it; otherwise this service has nothing to do.
+        if (HotspotController.owner.value != null) {
+            if (poller?.isActive != true) poller = scope.launch { pollLoop() }
+        } else {
+            stopSelf()
+        }
     }
 
     private suspend fun pollLoop() {
@@ -162,6 +185,8 @@ class HotspotService : Service() {
         const val NOTIFICATION_ID = 1
         const val STOPPED_NOTIFICATION_ID = 2
         const val ACTION_STOP = "com.oshri.multihotspot.STOP"
+        /** Home-screen widget's on/off button. */
+        const val ACTION_TOGGLE = "com.oshri.multihotspot.TOGGLE"
 
         @Volatile
         var running = false

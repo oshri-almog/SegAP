@@ -62,9 +62,23 @@ object Validation {
         return errors
     }
 
-    /** The Shizuku engine runs the first network only (no fixed IPs, no access to others): the rest needn't be valid. */
-    fun shizukuConfig(c: HotspotConfig): List<String> =
-        config(c.copy(groups = c.groups.take(1).map { it.copy(canReach = emptyList()) }, staticLeases = emptyList()))
+    /**
+     * What has to be fixed before starting. Only the networks that are switched on count; the Shizuku engine runs
+     * just the first of them (no fixed IPs, no access to others).
+     */
+    fun forStart(c: HotspotConfig, shizuku: Boolean): List<String> {
+        if (c.groups.isNotEmpty() && c.groups.none { it.enabled }) return listOf("All networks are switched off - switch one on (Networks tab)")
+        val a = c.active()
+        return config(if (shizuku) a.copy(groups = a.groups.take(1).map { it.copy(canReach = emptyList()) }, staticLeases = emptyList()) else a)
+    }
+
+    /** Profile names: not blank, unique (ignoring case). */
+    fun profileName(name: String, others: List<String>): String? = when {
+        name.isBlank() -> "Give the profile a name"
+        name.trim().length > 30 -> "At most 30 characters"
+        others.any { it.equals(name.trim(), ignoreCase = true) } -> "There is already a profile with that name"
+        else -> null
+    }
 
     /** Whole-config check. Returns human-readable problems (empty list = OK to start). */
     fun config(c: HotspotConfig): List<String> {

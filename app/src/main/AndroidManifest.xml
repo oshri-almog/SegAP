@@ -39,6 +39,19 @@
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
 
+        <!-- Home-screen widget: hotspot on/off, channel, connected devices. -->
+        <receiver
+            android:name=".widget.HotspotWidget"
+            android:exported="false"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/hotspot_widget_info" />
+        </receiver>
+
         <!-- Receives the Shizuku binder (Shizuku engine). -->
         <provider
             android:name="rikka.shizuku.ShizukuProvider"

@@ -32,32 +32,45 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.oshri.multihotspot.HotspotController
+import com.oshri.multihotspot.model.EngineState
 import com.oshri.multihotspot.model.Group
 import com.oshri.multihotspot.model.Validation
+import com.oshri.multihotspot.model.shizukuNetwork
+import kotlinx.coroutines.launch
 
 /** Tab 3: the networks (one password each). Editing opens [GroupEditScreen] over the tabs. */
 @Composable
 fun NetworksTab(padding: PaddingValues, onEditGroup: (String?) -> Unit) {
     val config by HotspotController.config.collectAsStateWithLifecycle()
     val status by HotspotController.status.collectAsStateWithLifecycle()
+    val busy by HotspotController.busy.collectAsStateWithLifecycle()
     var qrFor by remember { mutableStateOf<Group?>(null) }
     val caps = capabilities()
+    val snackbar = LocalSnackbar.current
+    val scope = rememberCoroutineScope()
+    val running = status.state == EngineState.RUNNING
+    val shizukuNet = config.shizukuNetwork()
     val canAdd = config.groups.size < Validation.MAX_GROUPS && caps.multipleNetworks
 
     LazyColumn(
@@ -71,8 +84,10 @@ fun NetworksTab(padding: PaddingValues, onEditGroup: (String?) -> Unit) {
                 Text(
                     when {
                         !caps.multipleNetworks -> "With the Shizuku engine there is one network: devices join \"${config.ssid}\" " +
-                            "with ${config.groups.first().name}'s password. The other networks need root."
-                        canAdd -> "Devices joining \"${config.ssid}\" land in the network whose password they used."
+                            "with ${shizukuNet?.name ?: "the first switched-on network"}'s password (the first network that is " +
+                            "switched on). Running the others too needs root."
+                        canAdd -> "Devices joining \"${config.ssid}\" land in the network whose password they used. " +
+                            "A switched-off network's password doesn't work."
                         else -> "Devices joining \"${config.ssid}\" land in the network whose password they used. " +
                             "You have the maximum of ${Validation.MAX_GROUPS} networks."
                     },
@@ -85,8 +100,15 @@ fun NetworksTab(padding: PaddingValues, onEditGroup: (String?) -> Unit) {
         items(config.groups, key = { it.id }) { g ->
             val idx = config.groups.indexOf(g)
             GroupCard(
-                // Shizuku runs the first network only.
-                modifier = Modifier.unavailable(if (idx > 0 && !caps.multipleNetworks) NEEDS_ROOT else null),
+                // Shizuku runs one network: the first one switched on.
+                greyReason = if (!caps.multipleNetworks && g.enabled && g.id != shizukuNet?.id) NEEDS_ROOT else null,
+                // Off switches apply at once, so not while the hotspot is starting or stopping.
+                switchEnabled = busy == null,
+                onSwitch = { on ->
+                    val msg = HotspotController.setNetworkEnabled(g.id, on)
+                        ?: "${g.name} switched ${if (on) "on" else "off"}".takeIf { running }?.plus(" - the hotspot restarts with it")
+                    if (msg != null) scope.launch { snackbar.showSnackbar(msg) }
+                },
                 rootDetails = caps.firewall,
                 isolationShown = caps.deviceIsolation,
                 group = g,
@@ -109,7 +131,10 @@ fun NetworksTab(padding: PaddingValues, onEditGroup: (String?) -> Unit) {
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun GroupCard(
-    modifier: Modifier,
+    /** Why this network can't run with the engine in use (greyed out, but its switch still works). */
+    greyReason: String?,
+    switchEnabled: Boolean,
+    onSwitch: (Boolean) -> Unit,
     /** Addresses, firewall and Tailscale tags apply (root engine). */
     rootDetails: Boolean,
     isolationShown: Boolean,
@@ -123,12 +148,14 @@ private fun GroupCard(
 ) {
     var showPw by remember { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
-    Card(modifier.fillMaxWidth().clickable(onClick = onEdit)) {
+    // Greyed out (engine can't run it) or dimmed (switched off); the on/off switch stays usable either way.
+    val dim = Modifier.unavailable(greyReason).alpha(if (group.enabled) 1f else 0.5f)
+    Card(Modifier.fillMaxWidth().clickable(enabled = greyReason == null, onClick = onEdit)) {
         Row(Modifier.height(IntrinsicSize.Min)) {
-            Box(Modifier.width(6.dp).fillMaxHeight().background(color, RoundedCornerShape(topStart = 12.dp, bottomStart = 12.dp)))
+            Box(Modifier.width(6.dp).fillMaxHeight().background(color, RoundedCornerShape(topStart = 12.dp, bottomStart = 12.dp)).then(dim))
             Column(Modifier.padding(14.dp).weight(1f)) {
                 // Title row: name, password, then show / QR / copy, then edit.
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(dim, verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         group.name,
                         style = MaterialTheme.typography.titleMedium,
@@ -155,13 +182,22 @@ private fun GroupCard(
                     CardIconButton(Icons.Default.ContentCopy, "Copy password") { clipboard.setText(AnnotatedString(group.password)) }
                     CardIconButton(Icons.Default.Edit, "Edit ${group.name}", onEdit)
                 }
-                Text(
-                    if (rootDetails) "${group.networkCidr} · gateway ${group.gateway}" else "Addresses chosen by Android",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(bottom = 6.dp),
-                )
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        if (rootDetails) "${group.networkCidr} · gateway ${group.gateway}" else "Addresses chosen by Android",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = dim.weight(1f),
+                    )
+                    Switch(
+                        checked = group.enabled,
+                        onCheckedChange = onSwitch,
+                        enabled = switchEnabled,
+                        modifier = Modifier.semantics { contentDescription = "${group.name} on or off" },
+                    )
+                }
+                FlowRow(dim.padding(top = 2.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (!group.enabled) Tag("Switched off")
                     if (rootDetails) {
                         Tag(if (group.internet) "Internet" else "No internet")
                         if (group.tailscale) Tag("Tailscale")

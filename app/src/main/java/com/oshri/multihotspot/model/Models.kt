@@ -34,6 +34,8 @@ data class Group(
      * so tailnet devices reach this group's devices (once the route is approved in the tailnet).
      */
     val shareSubnet: Boolean = false,
+    /** Switched off: its password doesn't work and it isn't set up at all (kept for switching back on). */
+    val enabled: Boolean = true,
 ) {
     val usesExitNode: Boolean get() = exitNodeIp.isNotBlank()
 
@@ -85,6 +87,12 @@ data class HotspotConfig(
     val band5: Boolean = false,
     /** 5 GHz channel, 0 = let the phone choose. */
     val channel5: Int = 0,
+    /**
+     * Saved sets of hotspot settings (name, channel, radio...); the fields above are always the [activeProfile]'s
+     * (see [syncedProfiles]). Empty only in configs from before profiles.
+     */
+    val profiles: List<HotspotProfile> = emptyList(),
+    val activeProfile: String = "",
 ) {
     fun group(id: String): Group? = groups.firstOrNull { it.id == id }
 
@@ -121,19 +129,85 @@ data class HotspotConfig(
     }
 }
 
-/** Order-insensitive form, so re-saving the same settings doesn't look like a change. 5 GHz is Shizuku-only. */
-fun HotspotConfig.normalized(): HotspotConfig = copy(
-    staticLeases = staticLeases.sortedWith(compareBy({ it.groupId }, { it.mac })),
+/** The hotspot settings a profile holds; the networks are shared by all profiles. */
+data class HotspotProfile(
+    val id: String,
+    val name: String,
+    val ssid: String,
+    val channel: Int,
+    val hidden: Boolean = false,
+    val maxClients: Int = 10,
+    val bssid: String,
+    val iface: String = "swlan0",
+    val wifiMode: WifiMode = WifiMode.KEEP,
+    val strictIsolation: Boolean = true,
+    val band5: Boolean = false,
+    val channel5: Int = 0,
+)
+
+/** The current hotspot settings as profile [id] / [name]. */
+fun HotspotConfig.asProfile(id: String, name: String) = HotspotProfile(
+    id = id, name = name, ssid = ssid, channel = channel, hidden = hidden, maxClients = maxClients, bssid = bssid,
+    iface = iface, wifiMode = wifiMode, strictIsolation = strictIsolation, band5 = band5, channel5 = channel5,
+)
+
+/** The config with [p]'s hotspot settings in effect. */
+fun HotspotConfig.withSettingsOf(p: HotspotProfile) = copy(
+    ssid = p.ssid, channel = p.channel, hidden = p.hidden, maxClients = p.maxClients, bssid = p.bssid, iface = p.iface,
+    wifiMode = p.wifiMode, strictIsolation = p.strictIsolation, band5 = p.band5, channel5 = p.channel5,
+    activeProfile = p.id,
+)
+
+/**
+ * The config with its profile list consistent: at least one profile (a config from before profiles gets "Default"),
+ * a valid [HotspotConfig.activeProfile], and that profile holding the current hotspot settings.
+ */
+fun HotspotConfig.syncedProfiles(): HotspotConfig {
+    if (profiles.isEmpty()) return copy(profiles = listOf(asProfile("p1", "Default")), activeProfile = "p1")
+    val active = profiles.firstOrNull { it.id == activeProfile } ?: profiles.first()
+    return copy(profiles = profiles.map { if (it.id == active.id) asProfile(it.id, it.name) else it }, activeProfile = active.id)
+}
+
+/** The network the Shizuku engine (the phone's own hotspot: one password) runs: the first one switched on. */
+fun HotspotConfig.shizukuNetwork(): Group? = groups.firstOrNull { it.enabled }
+
+fun HotspotConfig.nextProfileId(): String {
+    var n = profiles.size + 1
+    while (profiles.any { it.id == "p$n" }) n++
+    return "p$n"
+}
+
+/**
+ * What the engine runs: only the networks that are switched on, and only what refers to them (fixed IPs, access
+ * between networks). Profiles are app-side only.
+ */
+fun HotspotConfig.active(): HotspotConfig {
+    val on = groups.filter { it.enabled }
+    val ids = on.map { it.id }.toSet()
+    return copy(
+        groups = on.map { g -> g.copy(canReach = g.canReach.filter { it in ids }) },
+        staticLeases = staticLeases.filter { it.groupId in ids },
+        profiles = emptyList(), activeProfile = "",
+    )
+}
+
+/**
+ * Order-insensitive form of what the engine runs, so re-saving the same settings (or editing a network that is
+ * switched off, or a profile's name) doesn't look like a change. 5 GHz is Shizuku-only.
+ */
+fun HotspotConfig.normalized(): HotspotConfig = active().copy(
+    staticLeases = staticLeases.filter { l -> groups.any { it.id == l.groupId && it.enabled } }
+        .sortedWith(compareBy({ it.groupId }, { it.mac })),
     blockedMacs = blockedMacs.map { it.lowercase() }.sorted(),
     band5 = false, channel5 = 0,
 )
 
 /**
- * The part of the config the Shizuku engine uses: Wi-Fi name, the first network's password and isolation, radio
- * settings, block list. Changes elsewhere don't need Apply there.
+ * The part of the config the Shizuku engine uses: Wi-Fi name, the first switched-on network's password and
+ * isolation, radio settings, block list. Changes elsewhere don't need Apply there.
  */
-fun HotspotConfig.shizukuView(): HotspotConfig = copy(
-    groups = groups.take(1).map { g ->
+fun HotspotConfig.shizukuView(): HotspotConfig = active().copy(
+    groups = active().groups.take(1).map { g ->
         Group(id = g.id, name = "", password = g.password, gateway = "", prefix = 0, dhcpStart = "", dhcpEnd = "",
             devicesSeeEachOther = g.devicesSeeEachOther)
     },
@@ -313,7 +387,7 @@ object ShizukuConfigPrint {
         return bytes.take(8).joinToString("") { "%02x".format(it) }
     }
 
-    fun of(c: HotspotConfig): String = of(c.ssid, c.groups.firstOrNull()?.password, c.hidden)
+    fun of(c: HotspotConfig): String = of(c.ssid, c.shizukuNetwork()?.password, c.hidden)
 }
 
 data class PhoneHotspotSupport(

@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.oshri.multihotspot.HotspotController
 import com.oshri.multihotspot.engine.BackendKind
+import com.oshri.multihotspot.model.EngineState
 import com.oshri.multihotspot.model.HotspotConfig
 import com.oshri.multihotspot.model.Mac
 import com.oshri.multihotspot.model.Validation
@@ -47,7 +48,10 @@ import com.oshri.multihotspot.model.WifiMode
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
-/** Tab 2: settings shared by all networks (Wi-Fi name, channel, radio). Edits are kept until Save or Discard. */
+/**
+ * Tab 2: settings shared by all networks (Wi-Fi name, channel, radio), saved in the profile in use. Edits are kept
+ * until Save or Discard.
+ */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun HotspotTab(padding: PaddingValues) {
@@ -56,19 +60,21 @@ fun HotspotTab(padding: PaddingValues) {
     val backend by HotspotController.backend.collectAsStateWithLifecycle()
     val caps = capabilities()
     val shizuku = backend == BackendKind.SHIZUKU
+    val busy by HotspotController.busy.collectAsStateWithLifecycle()
+    // The edits below belong to the profile in use: switching profile starts over with its settings.
     val snackbar = LocalSnackbar.current
     val scope = rememberCoroutineScope()
-    var ssid by rememberSaveable { mutableStateOf(config.ssid) }
-    var channel by rememberSaveable { mutableIntStateOf(config.channel) }
-    var band5 by rememberSaveable { mutableStateOf(config.band5) }
-    var channel5 by rememberSaveable { mutableIntStateOf(config.channel5) }
-    var hidden by rememberSaveable { mutableStateOf(config.hidden) }
-    var maxClients by rememberSaveable { mutableIntStateOf(config.maxClients) }
-    var wifiMode by rememberSaveable { mutableStateOf(config.wifiMode) }
-    var iface by rememberSaveable { mutableStateOf(config.iface) }
-    var strict by rememberSaveable { mutableStateOf(config.strictIsolation) }
-    var bssid by rememberSaveable { mutableStateOf(config.bssid) }
-    var errors by rememberSaveable { mutableStateOf<List<String>>(emptyList()) }
+    var ssid by rememberSaveable(config.activeProfile) { mutableStateOf(config.ssid) }
+    var channel by rememberSaveable(config.activeProfile) { mutableIntStateOf(config.channel) }
+    var band5 by rememberSaveable(config.activeProfile) { mutableStateOf(config.band5) }
+    var channel5 by rememberSaveable(config.activeProfile) { mutableIntStateOf(config.channel5) }
+    var hidden by rememberSaveable(config.activeProfile) { mutableStateOf(config.hidden) }
+    var maxClients by rememberSaveable(config.activeProfile) { mutableIntStateOf(config.maxClients) }
+    var wifiMode by rememberSaveable(config.activeProfile) { mutableStateOf(config.wifiMode) }
+    var iface by rememberSaveable(config.activeProfile) { mutableStateOf(config.iface) }
+    var strict by rememberSaveable(config.activeProfile) { mutableStateOf(config.strictIsolation) }
+    var bssid by rememberSaveable(config.activeProfile) { mutableStateOf(config.bssid) }
+    var errors by rememberSaveable(config.activeProfile) { mutableStateOf<List<String>>(emptyList()) }
 
     fun edited(c: HotspotConfig) = c.copy(
         ssid = ssid, channel = channel, band5 = band5, channel5 = channel5, hidden = hidden, maxClients = maxClients,
@@ -98,6 +104,8 @@ fun HotspotTab(padding: PaddingValues) {
             Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
+            ProfileSection(config, dirty = dirty, running = status.state == EngineState.RUNNING, busy = busy != null)
+
             if (errors.isNotEmpty()) MessageCard("Please fix", errors.joinToString("\n") { "• $it" }, error = true)
 
             OutlinedTextField(
@@ -190,6 +198,7 @@ fun HotspotTab(padding: PaddingValues) {
             )
 
             EngineSection()
+            WidgetSection()
             Spacer(Modifier.height(16.dp))
         }
         // Sticky, so Save is reachable without scrolling to the end.

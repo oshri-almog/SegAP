@@ -1,4 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">SegAP</string>
+    <string name="widget_description">Hotspot on/off, Wi-Fi name and channel, and the connected devices with their IPs</string>
+    <string name="widget_refresh">Refresh</string>
+    <string name="widget_turn_on">Turn on</string>
+    <string name="widget_dot">●</string>
 </resources>
