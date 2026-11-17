@@ -15,7 +15,7 @@
 #   mh_engine.sh ts-down <group> | ts-logout <group>
 #
 # <cfgdir> must contain:
-#   engine.conf  KEY=VALUE lines: IFACE, MAC (address or "hw" = the phone's factory MAC), WIFI_MODE (keep|off),
+#   engine.conf  KEY=VALUE lines: IFACE, MAC (address or "hw" = the AP interface's own hardware MAC), WIFI_MODE (keep|off),
 #                UPSTREAM (auto|<iface>), DEFAULT_GROUP, WL_HELPER, TXPOWER (dBm limit, 0/absent = none)
 #   hostapd.conf complete hostapd config (wpa_psk_file must point to $HD/psk.txt)
 #   psk.txt      hostapd wpa_psk_file, one "keyid=<group> 00:00:00:00:00:00 <passphrase>" per group
@@ -1054,9 +1054,10 @@ start() {
   setsid sh $ST/mh_engine.sh daemon </dev/null >/dev/null 2>&1 &
 
   ip link set $IF down
+  save_hw_mac $IF
   if [ "$MAC" = hw ]; then
-    MAC=$(hw_mac)
-    if [ -n "$MAC" ]; then log "using the phone's own (hardware) MAC"; else log "hardware MAC unknown - keeping the interface's address"; fi
+    MAC=$(hw_mac $IF)
+    if [ -n "$MAC" ]; then log "using the interface's hardware MAC"; else log "hardware MAC not known yet (restart the phone once) - keeping the interface's address"; fi
   fi
   [ -n "$MAC" ] && ip link set $IF address $MAC
   rm -f $CTRL_DIR/$IF
@@ -1124,13 +1125,18 @@ start() {
   echo "OK"
 }
 
-# The phone's factory Wi-Fi MAC (Samsung keeps it in the EFS partition), lower case; empty if unknown.
+# The hardware address the Wi-Fi driver gives the AP interface (empty if unknown). Not the phone's factory
+# (client) MAC: putting that on the AP interface left the S10's driver unable to connect to Wi-Fi until a
+# reboot. The driver's own address is saved the first time it's seen untouched (addr_assign_type 0, i.e.
+# not set by us since boot) and stays the same across boots.
+save_hw_mac() {
+  [ "$(cat /sys/class/net/$1/addr_assign_type 2>/dev/null)" = 0 ] || return 0
+  sh_m=$(cat /sys/class/net/$1/address 2>/dev/null)
+  is_mac "$sh_m" && echo "$sh_m" > $ST/hwmac.$1
+}
 hw_mac() {
-  for hm_f in /mnt/vendor/efs/wifi/.mac.info /efs/wifi/.mac.info; do
-    hm_m=$(tr -d ' \r\n' < $hm_f 2>/dev/null | tr 'A-F' 'a-f')
-    echo "$hm_m" | grep -qE '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' && { echo "$hm_m"; return 0; }
-  done
-  return 1
+  hm_m=$(cat $ST/hwmac.$1 2>/dev/null)
+  is_mac "$hm_m" && echo "$hm_m"
 }
 
 # Transmit power limit (TXPOWER dBm, via the firmware's "qtxpower" in quarter dBm). It is a limit, never above

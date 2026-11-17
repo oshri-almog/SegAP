@@ -235,7 +235,7 @@ fun HotspotTab(padding: PaddingValues) {
                 }
                 RadioRow(
                     "Hardware",
-                    "The phone's own factory Wi-Fi address (read from the phone when the hotspot starts).",
+                    "The address the Wi-Fi chip itself gives the hotspot (not the phone's own Wi-Fi MAC, which would confuse the driver).",
                     macMode == MacMode.HARDWARE,
                 ) { macMode = MacMode.HARDWARE }
                 Text(
